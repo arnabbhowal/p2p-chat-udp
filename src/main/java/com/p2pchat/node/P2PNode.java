@@ -9,6 +9,7 @@ import main.java.com.p2pchat.node.network.PeerMessageHandler;
 import main.java.com.p2pchat.node.network.ServerMessageHandler;
 import main.java.com.p2pchat.node.service.ChatService;
 import main.java.com.p2pchat.node.service.ConnectionService;
+import main.java.com.p2pchat.node.service.FileTransferService; // Added
 import main.java.com.p2pchat.node.service.RegistrationService;
 import main.java.com.p2pchat.node.ui.CommandLineInterface;
 
@@ -23,11 +24,16 @@ public class P2PNode {
     private static NodeContext nodeContext;
     private static NetworkManager networkManager;
     private static ConnectionService connectionService;
+    private static FileTransferService fileTransferService; // Added
     private static CommandLineInterface commandLineInterface;
     private static RegistrationService registrationService;
     private static ChatService chatService;
 
     public static void main(String[] args) {
+        // Set current time for testing purposes
+         String testDate = "2025-05-03T13:17:52-04:00"; // Approx time of request
+         // In real code, you'd use Instant.now() or similar
+
         if (args.length > 0 && args[0] != null && !args[0].trim().isEmpty()) {
             NodeConfig.SERVER_IP = args[0].trim();
             System.out.println("[*] Using Server IP from command line: " + NodeConfig.SERVER_IP);
@@ -65,7 +71,8 @@ public class P2PNode {
 
         // --- Start background services and UI ---
         connectionService.start(); // Start keepalives, pinging logic
-        commandLineInterface = new CommandLineInterface(nodeContext, connectionService, chatService);
+        fileTransferService.start(); // Start file transfer timeout checker
+        commandLineInterface = new CommandLineInterface(nodeContext, connectionService, chatService, fileTransferService); // Pass file transfer service
 
         // Add shutdown hook AFTER essential services are created
         Runtime.getRuntime().addShutdownHook(new Thread(P2PNode::shutdown));
@@ -101,10 +108,12 @@ public class P2PNode {
             registrationService = new RegistrationService(nodeContext, networkManager);
             chatService = new ChatService(nodeContext, networkManager);
             connectionService = new ConnectionService(nodeContext, networkManager);
+            fileTransferService = new FileTransferService(nodeContext, networkManager); // Added
 
             // Create message handlers which need other services
             ServerMessageHandler serverMsgHandler = new ServerMessageHandler(nodeContext, connectionService, chatService);
-            PeerMessageHandler peerMsgHandler = new PeerMessageHandler(nodeContext, connectionService, chatService, networkManager);
+            // Pass fileTransferService to PeerMessageHandler
+            PeerMessageHandler peerMsgHandler = new PeerMessageHandler(nodeContext, connectionService, chatService, fileTransferService, networkManager);
             MessageHandler messageHandler = new MessageHandler(nodeContext, serverMsgHandler, peerMsgHandler, connectionService);
 
             // Inject the fully configured MessageHandler into NetworkManager using the setter
@@ -122,21 +131,27 @@ public class P2PNode {
         System.out.print("[?] Enter your desired username: ");
         Scanner inputScanner = new Scanner(System.in); // Use a temporary scanner for username only
         String inputName = "";
-        while (inputName == null || inputName.trim().isEmpty()) {
-            if (inputScanner.hasNextLine()) {
-                inputName = inputScanner.nextLine().trim();
-                if (inputName.isEmpty()) {
-                    System.out.print("[!] Username cannot be empty. Please enter a username: ");
-                }
-            } else {
-                System.out.println("\n[*] Input stream closed during username entry. Using default.");
-                inputName = nodeContext.myUsername; // Keep default
-                break;
-            }
+        // Use default if no input stream available (e.g., testing)
+        if (System.console() == null && !inputScanner.hasNextLine()) {
+             System.out.println("\n[*] No interactive console detected. Using default username: " + nodeContext.myUsername);
+             inputName = nodeContext.myUsername;
+        } else {
+             while (inputName == null || inputName.trim().isEmpty()) {
+                  if (inputScanner.hasNextLine()) {
+                       inputName = inputScanner.nextLine().trim();
+                       if (inputName.isEmpty()) {
+                           System.out.print("[!] Username cannot be empty. Please enter a username: ");
+                       }
+                  } else {
+                       System.out.println("\n[*] Input stream closed during username entry. Using default.");
+                       inputName = nodeContext.myUsername; // Keep default
+                       break;
+                  }
+             }
         }
-         nodeContext.myUsername = inputName;
+         nodeContext.myUsername = inputName.trim(); // Ensure trimmed
          System.out.println("[*] Username set to: " + nodeContext.myUsername);
-         // Don't close System.in scanner
+         // Don't close System.in scanner if it wasn't the temporary one
     }
 
 
@@ -149,6 +164,9 @@ public class P2PNode {
 
 
         // Stop services that have background threads first
+         if (fileTransferService != null) { // Added
+             fileTransferService.stop();
+         }
         if (connectionService != null) {
             connectionService.stop();
         }
@@ -156,10 +174,19 @@ public class P2PNode {
             networkManager.stop(); // Stops listener thread and closes socket
         }
 
+
+         // Clean up transfers explicitly on shutdown
+         if (nodeContext != null) {
+              nodeContext.cancelAndCleanupTransfersForPeer(null, "Node shutdown"); // Cancel all transfers
+         }
+
          // Clear sensitive data
-         nodeContext.peerSymmetricKeys.clear();
-         nodeContext.myKeyPair = null;
-         System.out.println("[*] Cleared cryptographic keys.");
+         if (nodeContext != null) {
+             nodeContext.peerSymmetricKeys.clear();
+             nodeContext.myKeyPair = null;
+             System.out.println("[*] Cleared cryptographic keys.");
+         }
+
 
         System.out.println("[*] Node shutdown sequence complete.");
     }

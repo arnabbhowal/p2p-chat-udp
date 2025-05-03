@@ -5,6 +5,7 @@ import main.java.com.p2pchat.node.model.NodeContext;
 import main.java.com.p2pchat.node.model.NodeState;
 import main.java.com.p2pchat.node.service.ChatService;
 import main.java.com.p2pchat.node.service.ConnectionService; // Needed to signal UDP path confirmation
+import main.java.com.p2pchat.node.service.FileTransferService; // Added for file transfer
 
 import org.json.JSONObject;
 import java.net.InetSocketAddress;
@@ -17,12 +18,15 @@ public class PeerMessageHandler {
     private final NodeContext context;
     private final ConnectionService connectionService;
     private final ChatService chatService;
+    private final FileTransferService fileTransferService; // Added
     private final NetworkManager networkManager; // Needed to send pong
 
-    public PeerMessageHandler(NodeContext context, ConnectionService connectionService, ChatService chatService, NetworkManager networkManager) {
+    // Updated constructor
+    public PeerMessageHandler(NodeContext context, ConnectionService connectionService, ChatService chatService, FileTransferService fileTransferService, NetworkManager networkManager) {
         this.context = context;
         this.connectionService = connectionService;
         this.chatService = chatService;
+        this.fileTransferService = fileTransferService; // Added
         this.networkManager = networkManager;
     }
 
@@ -86,9 +90,12 @@ public class PeerMessageHandler {
         }
 
         switch (action) {
+            // Chat actions
             case "e_chat":
                 chatService.receiveEncryptedChat(data);
                 break;
+
+            // Connection maintenance actions
             case "keepalive":
                 // Log receipt? Update last seen for peer? For now, do nothing.
                 break;
@@ -102,6 +109,25 @@ public class PeerMessageHandler {
                  System.out.println("\n[*] Received disconnect notification from " + context.getPeerDisplayName() + ".");
                  connectionService.handlePeerDisconnect();
                  break;
+
+             // --- File Transfer Actions ---
+             case "file_offer":
+                 fileTransferService.handleIncomingOffer(data, peerAddr);
+                 break;
+             case "file_accept":
+                  fileTransferService.handleFileAccept(data);
+                  break;
+             case "file_reject":
+                  fileTransferService.handleFileReject(data);
+                  break;
+             case "file_data":
+                  fileTransferService.handleFileData(data);
+                  break;
+             case "file_ack":
+                  fileTransferService.handleFileAck(data);
+                  break;
+            // --- End File Transfer Actions ---
+
             default:
                 System.out.println("[?] Received unknown action '" + action + "' from connected peer " + context.getPeerDisplayName());
                 break;
