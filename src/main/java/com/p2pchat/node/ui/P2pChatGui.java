@@ -17,6 +17,7 @@ import java.awt.event.ActionListener;
 import java.awt.event.WindowAdapter;
 import java.awt.event.WindowEvent;
 import java.io.File;
+import java.net.URL;
 import java.util.concurrent.ConcurrentHashMap;
 
 public class P2pChatGui implements GuiCallback {
@@ -38,29 +39,28 @@ public class P2pChatGui implements GuiCallback {
     private JLabel statusLabel;
     private JLabel nodeIdLabel;
     private JPanel transferPanel;
-    private JButton copyIdButton; // Added button field
+    private JButton copyIdButton;
 
     // State
-    private String ownNodeId = null; // Store own node ID for copy button
+    private String ownNodeId = null;
 
-    // Map to track progress bars/labels for ongoing transfers
+    // Maps for transfer tracking
     private final ConcurrentHashMap<String, JProgressBar> transferProgressBars = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, JLabel> transferLabels = new ConcurrentHashMap<>();
-
 
     public P2pChatGui(NodeContext context, ConnectionService connService, ChatService chatSvc, FileTransferService ftService) {
         this.nodeContext = context;
         this.connectionService = connService;
         this.chatService = chatSvc;
         this.fileTransferService = ftService;
-
-        // Create Swing components on the Event Dispatch Thread
         SwingUtilities.invokeLater(this::initializeGui);
     }
 
     private void initializeGui() {
         frame = new JFrame("P2P Secure Chat");
-        frame.setSize(700, 550);
+        // Increased default size and added minimum size
+        frame.setSize(850, 650);
+        frame.setMinimumSize(new Dimension(650, 450));
         frame.setDefaultCloseOperation(JFrame.DO_NOTHING_ON_CLOSE);
         frame.addWindowListener(new WindowAdapter() {
             @Override
@@ -73,28 +73,65 @@ public class P2pChatGui implements GuiCallback {
         });
         frame.setLayout(new BorderLayout(5, 5));
 
-        // --- Top Panel (Node ID, Copy Button, Status, Action Buttons) ---
-        JPanel topPanel = new JPanel(new BorderLayout(5, 5));
+        // --- Top Panel ---
+        JPanel topPanel = new JPanel(new BorderLayout(10, 5));
+        topPanel.setBorder(BorderFactory.createEtchedBorder());
+
+        // --- Left side of Top Panel (ID, Copy, Status) ---
+        JPanel leftTopPanel = new JPanel();
+        leftTopPanel.setLayout(new BoxLayout(leftTopPanel, BoxLayout.Y_AXIS));
+        leftTopPanel.setBorder(BorderFactory.createEmptyBorder(5, 10, 5, 10));
 
         // Node ID Area (Label + Copy Button)
-        JPanel nodeIdPanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 5, 0)); // Left align, 5px hgap
+        JPanel nodeIdPanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 5, 0));
+        nodeIdPanel.setAlignmentX(Component.LEFT_ALIGNMENT);
         nodeIdLabel = new JLabel("Node ID: <Registering...>");
-        copyIdButton = new JButton("Copy");
+
+        // Create Icon Button
+        copyIdButton = new JButton();
+        try {
+            // Load icon from '/icons/copy_icon.png' relative to classpath root
+            // REQUIRES 'resources' folder added to classpath in the 'java -cp ...' command
+            URL iconUrl = getClass().getResource("/icons/copy_icon.png");
+
+            if (iconUrl != null) {
+                ImageIcon copyIcon = new ImageIcon(iconUrl);
+                // Optional scaling:
+                // Image img = copyIcon.getImage().getScaledInstance(16, 16, Image.SCALE_SMOOTH);
+                // copyIcon = new ImageIcon(img);
+                copyIdButton.setIcon(copyIcon);
+                copyIdButton.setBorder(BorderFactory.createEmptyBorder(0, 2, 0, 2));
+                copyIdButton.setContentAreaFilled(false);
+                copyIdButton.setFocusPainted(false);
+                copyIdButton.setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
+                copyIdButton.setPreferredSize(new Dimension(copyIcon.getIconWidth() + 4, copyIcon.getIconHeight() + 4));
+            } else {
+                System.err.println("Warning: /icons/copy_icon.png not found in classpath. Using text button '[C]'.");
+                copyIdButton.setText("[C]");
+                copyIdButton.setMargin(new Insets(1, 1, 1, 1));
+                copyIdButton.setFont(new Font("Arial", Font.BOLD, 10));
+            }
+        } catch (Exception e) {
+            System.err.println("Error loading copy icon: " + e.getMessage());
+            copyIdButton.setText("[C]");
+            copyIdButton.setMargin(new Insets(1, 1, 1, 1));
+            copyIdButton.setFont(new Font("Arial", Font.BOLD, 10));
+        }
         copyIdButton.setToolTipText("Copy Node ID to clipboard");
-        copyIdButton.setMargin(new Insets(1, 5, 1, 5)); // Make button smaller
-        copyIdButton.setEnabled(false); // Enable when ID is received
+        copyIdButton.setEnabled(false);
+
         nodeIdPanel.add(nodeIdLabel);
         nodeIdPanel.add(copyIdButton);
 
+        // Status Label
         statusLabel = new JLabel("Status: Initializing...");
         statusLabel.setForeground(Color.ORANGE);
+        statusLabel.setAlignmentX(Component.LEFT_ALIGNMENT);
 
-        JPanel statusAndIdPanel = new JPanel(new BorderLayout()); // Use BorderLayout
-        statusAndIdPanel.add(nodeIdPanel, BorderLayout.NORTH); // ID and Copy on top
-        statusAndIdPanel.add(statusLabel, BorderLayout.CENTER); // Status below
-        statusAndIdPanel.setBorder(BorderFactory.createEmptyBorder(5, 10, 5, 10)); // Add padding
+        leftTopPanel.add(nodeIdPanel);
+        leftTopPanel.add(statusLabel);
 
-        // Action Buttons Panel
+        // --- Right side of Top Panel (Action Buttons) ---
         JPanel buttonPanel = new JPanel(new FlowLayout(FlowLayout.LEFT));
         connectButton = new JButton("Connect");
         disconnectButton = new JButton("Disconnect");
@@ -103,9 +140,8 @@ public class P2pChatGui implements GuiCallback {
         buttonPanel.add(disconnectButton);
         buttonPanel.add(sendFileButton);
 
-        topPanel.add(statusAndIdPanel, BorderLayout.CENTER);
+        topPanel.add(leftTopPanel, BorderLayout.CENTER);
         topPanel.add(buttonPanel, BorderLayout.EAST);
-        topPanel.setBorder(BorderFactory.createEtchedBorder());
 
         // --- Center Panel (Chat Area) ---
         chatArea = new JTextArea();
@@ -147,14 +183,12 @@ public class P2pChatGui implements GuiCallback {
 
         // Set initial state
         updateState(NodeState.INITIALIZING, null, null);
-
-        frame.setLocationRelativeTo(null);
+        frame.setLocationRelativeTo(null); // Center window
         frame.setVisible(true);
         displaySystemMessage("System: GUI Initialized. Waiting for registration...");
     }
 
-    // --- Action Handlers (GUI -> Backend) ---
-
+    // --- Action Handlers ---
     private void handleConnect(ActionEvent e) {
         String peerId = JOptionPane.showInputDialog(frame, "Enter Peer Node ID:", "Connect to Peer", JOptionPane.PLAIN_MESSAGE);
         if (peerId != null && !peerId.trim().isEmpty()) {
@@ -202,22 +236,21 @@ public class P2pChatGui implements GuiCallback {
             Clipboard clipboard = Toolkit.getDefaultToolkit().getSystemClipboard();
             clipboard.setContents(stringSelection, null);
             displaySystemMessage("System: Node ID copied to clipboard!");
-            copyIdButton.setText("Copied!");
-            Timer timer = new Timer(1500, ae -> copyIdButton.setText("Copy"));
+            copyIdButton.setToolTipText("Copied!");
+            Timer timer = new Timer(1500, ae -> copyIdButton.setToolTipText("Copy Node ID to clipboard"));
             timer.setRepeats(false);
             timer.start();
         }
     }
 
-    // --- GuiCallback Implementation (Backend -> GUI) ---
-
+    // --- GuiCallback Implementation ---
     @Override
     public void displayNodeId(String nodeId) {
-        this.ownNodeId = nodeId; // Store the ID
+        this.ownNodeId = nodeId;
         SwingUtilities.invokeLater(() -> {
             nodeIdLabel.setText("Node ID: " + nodeId);
-            copyIdButton.setEnabled(true); // Enable copy button now
-            displaySystemMessage("System: Registered with ID: " + nodeId); // Log to console
+            copyIdButton.setEnabled(true);
+            displaySystemMessage("System: Registered with ID: " + nodeId);
         });
     }
 
@@ -228,45 +261,33 @@ public class P2pChatGui implements GuiCallback {
             Color statusColor;
             boolean connected = (newState == NodeState.CONNECTED_SECURE);
             boolean connecting = (newState == NodeState.WAITING_MATCH || newState == NodeState.ATTEMPTING_UDP);
-            boolean disconnected = (newState == NodeState.DISCONNECTED);
-            boolean canConnect = disconnected || newState == NodeState.INITIALIZING; // Can connect if disconnected
-            String peerDisplay = "Peer"; // Default
+            boolean canConnect = (newState == NodeState.DISCONNECTED && this.ownNodeId != null);
+            String peerDisplay = "Peer";
             if (connected || connecting) {
                 peerDisplay = (peerUsername != null && !peerUsername.isEmpty()) ? peerUsername : (peerNodeId != null ? peerNodeId.substring(0, 8) + "..." : "Peer");
             }
 
-
             switch (newState) {
-                case INITIALIZING:
-                    statusText = "Status: Initializing..."; statusColor = Color.ORANGE; break;
-                case REGISTERING:
-                    statusText = "Status: Registering..."; statusColor = Color.ORANGE; break;
-                case DISCONNECTED:
-                    statusText = "Status: Disconnected"; statusColor = Color.RED; break;
-                case WAITING_MATCH:
-                    statusText = "Status: Waiting for " + peerDisplay + " match..."; statusColor = Color.ORANGE; break;
-                case ATTEMPTING_UDP:
-                    statusText = "Status: Attempting P2P with " + peerDisplay + "..."; statusColor = Color.ORANGE; break;
-                case CONNECTED_SECURE:
-                    statusText = "Status: ✅ Connected to " + peerDisplay; statusColor = new Color(0, 128, 0); break;
-                case SHUTTING_DOWN:
-                    statusText = "Status: Shutting down..."; statusColor = Color.GRAY; break;
-                default:
-                    statusText = "Status: Unknown"; statusColor = Color.BLACK; break;
+                case INITIALIZING: statusText = "Status: Initializing..."; statusColor = Color.ORANGE; break;
+                case REGISTERING: statusText = "Status: Registering..."; statusColor = Color.ORANGE; break;
+                case DISCONNECTED: statusText = "Status: Disconnected"; statusColor = Color.RED; break;
+                case WAITING_MATCH: statusText = "Status: Waiting for " + peerDisplay + " match..."; statusColor = Color.ORANGE; break;
+                case ATTEMPTING_UDP: statusText = "Status: Attempting P2P with " + peerDisplay + "..."; statusColor = Color.ORANGE; break;
+                case CONNECTED_SECURE: statusText = "Status: ✅ Connected to " + peerDisplay; statusColor = new Color(0, 128, 0); break;
+                case SHUTTING_DOWN: statusText = "Status: Shutting down..."; statusColor = Color.GRAY; break;
+                default: statusText = "Status: Unknown"; statusColor = Color.BLACK; break;
             }
 
             statusLabel.setText(statusText);
             statusLabel.setForeground(statusColor);
 
-            // Update button enablement
             connectButton.setEnabled(canConnect);
-            disconnectButton.setEnabled(connected || connecting); // Allow disconnect/cancel
+            disconnectButton.setEnabled(connected || connecting);
             sendButton.setEnabled(connected);
             messageField.setEnabled(connected);
             sendFileButton.setEnabled(connected);
-            copyIdButton.setEnabled(this.ownNodeId != null); // Enable if we have an ID
+            copyIdButton.setEnabled(this.ownNodeId != null);
 
-            // Clear progress bars if disconnected or connection failed/cancelled
             if (!connected && !connecting) {
                 clearFileProgress();
             }
@@ -275,7 +296,6 @@ public class P2pChatGui implements GuiCallback {
 
     @Override
     public void appendMessage(String message) {
-        // ONLY for chat messages or critical user-facing errors now
         if (!SwingUtilities.isEventDispatchThread()) {
             SwingUtilities.invokeLater(() -> appendMessage(message));
             return;
@@ -286,9 +306,7 @@ public class P2pChatGui implements GuiCallback {
 
     @Override
     public void displaySystemMessage(String message) {
-        // Currently logs to console
         System.out.println("GUI_LOG: " + message);
-        // TODO: Optionally implement appending to a separate log window/area
     }
 
     @Override
@@ -338,21 +356,22 @@ public class P2pChatGui implements GuiCallback {
             String direction = isSending ? "Sending" : "Receiving";
             int percentage = (totalBytes > 0) ? (int) ((100 * currentBytes) / totalBytes) : 0;
             String statusText = status.toString().replace("TRANSFERRING_", "").replace("OFFER_", "").replace("AWAITING_", "Wait");
-            String currentStatusText = String.format("%s '%s' (%s)", direction, filename.substring(0, Math.min(filename.length(), 10))+"..", statusText); // Shorten filename
+            String shortFilename = filename.length() > 15 ? filename.substring(0, 12) + "..." : filename;
+            String currentStatusText = String.format("%s '%s' (%s)", direction, shortFilename, statusText);
 
             label.setText(currentStatusText);
-            label.setToolTipText(String.format("%s '%s' (%s)", direction, filename, statusText)); // Full filename in tooltip
+            label.setToolTipText(String.format("%s '%s' (%s)", direction, filename, statusText));
             progressBar.setValue(percentage);
             progressBar.setString(String.format("%d%%", percentage));
 
             if (status == FileTransferState.Status.FAILED || status == FileTransferState.Status.CANCELLED || status == FileTransferState.Status.REJECTED) {
                 progressBar.setForeground(Color.RED);
             } else if (status == FileTransferState.Status.COMPLETED) {
-                progressBar.setForeground(Color.GREEN);
+                progressBar.setForeground(new Color(0, 150, 0));
             } else if (isSending) {
                 progressBar.setForeground(Color.BLUE);
             } else {
-                progressBar.setForeground(Color.MAGENTA);
+                progressBar.setForeground(new Color(0, 150, 0));
             }
         });
     }
@@ -366,16 +385,15 @@ public class P2pChatGui implements GuiCallback {
             boolean success = message.toLowerCase().contains("complete");
 
             if (progressBar != null) {
-                progressBar.setValue(100); // Ensure bar is full on finish/fail
+                progressBar.setValue(100);
                 progressBar.setString(message);
                 progressBar.setForeground(success ? new Color(0, 150, 0) : Color.RED);
             }
             if (label != null) {
-                 label.setText(label.getText() + " - " + message); // Append final status to label
+                label.setToolTipText(label.getToolTipText() + " - " + message);
             }
 
-            // Remove the component after a delay
-            Timer timer = new Timer(success ? 5000 : 8000, e -> removeTransferEntry(transferId)); // Longer delay for errors
+            Timer timer = new Timer(success ? 5000 : 8000, e -> removeTransferEntry(transferId));
             timer.setRepeats(false);
             timer.start();
         });
@@ -385,8 +403,6 @@ public class P2pChatGui implements GuiCallback {
     public void clearFileProgress() {
         SwingUtilities.invokeLater(() -> {
             transferProgressBars.keySet().forEach(this::removeTransferEntry);
-            transferLabels.clear();
-            transferProgressBars.clear();
             transferPanel.removeAll();
             transferPanel.revalidate();
             transferPanel.repaint();
@@ -396,28 +412,31 @@ public class P2pChatGui implements GuiCallback {
     private void removeTransferEntry(String transferId) {
         JProgressBar bar = transferProgressBars.remove(transferId);
         JLabel label = transferLabels.remove(transferId);
-        Component parentPanel = null;
+        Component entryPanelToRemove = null;
 
-        if (bar != null) { parentPanel = bar.getParent(); }
-        else if (label != null) { parentPanel = label.getParent();}
+        if (label != null) { entryPanelToRemove = label.getParent(); }
+        else if (bar != null) { entryPanelToRemove = bar.getParent();}
 
-        if (parentPanel != null) { // parentPanel is the entryPanel (BorderLayout)
-            Container grandParent = parentPanel.getParent(); // grandParent is transferPanel (BoxLayout)
-            if (grandParent != null) {
-                // Find the entryPanel and the spacing after it to remove both
+        if (entryPanelToRemove instanceof JPanel) {
+            Container grandParent = entryPanelToRemove.getParent();
+            if (grandParent == transferPanel) {
                 Component[] components = grandParent.getComponents();
+                int indexToRemove = -1;
                 for (int i = 0; i < components.length; i++) {
-                    if (components[i] == parentPanel) {
-                        grandParent.remove(parentPanel); // Remove the entry panel
-                        // Remove the rigid area spacer immediately following it, if present
-                        if (i + 1 < components.length && components[i + 1] instanceof Box.Filler) {
-                            grandParent.remove(components[i + 1]);
-                        }
+                    if (components[i] == entryPanelToRemove) {
+                        indexToRemove = i;
                         break;
                     }
                 }
-                grandParent.revalidate();
-                grandParent.repaint();
+
+                if (indexToRemove != -1) {
+                    if (indexToRemove + 1 < components.length && components[indexToRemove + 1] instanceof Box.Filler) {
+                         grandParent.remove(indexToRemove + 1);
+                    }
+                    grandParent.remove(indexToRemove);
+                    grandParent.revalidate();
+                    grandParent.repaint();
+                }
             }
         }
     }
