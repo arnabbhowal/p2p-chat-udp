@@ -11,7 +11,7 @@ public class FileTransferState {
 
     public enum Status {
         // Common states
-        NONE, FAILED, COMPLETED, CANCELLED, REJECTED,
+        NONE, FAILED, COMPLETED, CANCELLED, REJECTED, // <-- REJECTED Added
         // Sender states
         OFFER_SENT, AWAITING_ACCEPT, TRANSFERRING_SEND,
         // Receiver states
@@ -53,7 +53,7 @@ public class FileTransferState {
 
     // Convenience method to check if transfer is in a final state
     public boolean isTerminated() {
-         return status == Status.COMPLETED || status == Status.FAILED || status == Status.CANCELLED || status == Status.NONE;
+         return status == Status.COMPLETED || status == Status.FAILED || status == Status.CANCELLED || status == Status.REJECTED || status == Status.NONE;
     }
 
     // Add methods to safely close streams if needed

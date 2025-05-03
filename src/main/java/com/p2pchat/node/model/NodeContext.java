@@ -7,14 +7,13 @@ import javax.crypto.SecretKey;
 import java.net.DatagramSocket;
 import java.net.InetSocketAddress;
 import java.security.KeyPair;
+import java.util.ArrayList; // Added
 import java.util.List;
 import java.util.Map; // Added for Map import
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
-import java.util.ArrayList;
-
 
 // Holds the shared state of the P2P Node
 public class NodeContext {
@@ -95,13 +94,16 @@ public class NodeContext {
     // --- Helper method for cleaning up transfers ---
     public void cancelAndCleanupTransfersForPeer(String peerId, String reason) {
         List<String> transfersToRemove = new ArrayList<>();
+        // If peerId is null, cancel ALL transfers (e.g., during shutdown)
+        boolean cancelAll = (peerId == null);
+
         for (Map.Entry<String, FileTransferState> entry : ongoingTransfers.entrySet()) {
-            if (entry.getValue().peerNodeId.equals(peerId)) {
+            if (cancelAll || entry.getValue().peerNodeId.equals(peerId)) {
                 FileTransferState state = entry.getValue();
                 if (!state.isTerminated()) {
                     state.status = FileTransferState.Status.CANCELLED; // Mark as cancelled
                     state.closeStreams(); // Ensure streams are closed
-                    System.out.println("[FileTransfer] Cancelled transfer " + state.transferId + " with peer " + peerId + " due to: " + reason);
+                    System.out.println("[FileTransfer] Cancelled transfer " + state.transferId.substring(0,8) + "... with peer " + entry.getValue().peerNodeId.substring(0,8) + "... due to: " + reason);
                 }
                 transfersToRemove.add(entry.getKey());
             }
