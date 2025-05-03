@@ -1,40 +1,47 @@
-package main.java.com.p2pchat.server;
+package main.java.com.p2pchat.server.model;
 
 import main.java.com.p2pchat.common.Endpoint;
-// Removed technically unused import: import org.json.JSONObject;
 
 import java.net.Inet6Address;
 import java.net.InetSocketAddress;
 import java.time.Instant;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
-// Removed unused import: import java.util.stream.Collectors;
 
-
-// Represents information stored about a registered node
-class NodeInfo { // Keep package-private
+public class NodeInfo {
     String nodeId;
     String username;
-    String publicKeyBase64; // << NEW: Store node's public key (Base64 encoded)
-    List<Endpoint> endpoints = new CopyOnWriteArrayList<>(); // Thread-safe list
+    String publicKeyBase64;
+    List<Endpoint> endpoints = new CopyOnWriteArrayList<>();
     long lastSeen;
-    InetSocketAddress lastAddr; // Last address the node contacted us from
+    InetSocketAddress lastAddr;
 
-    NodeInfo(String nodeId, InetSocketAddress initialAddr) {
+    public NodeInfo(String nodeId, InetSocketAddress initialAddr) {
         this.nodeId = nodeId;
         this.lastSeen = Instant.now().toEpochMilli();
         this.lastAddr = initialAddr;
-        this.username = "User_" + nodeId.substring(0,4); // Default username
-        this.publicKeyBase64 = null; // Initialize public key as null
+        this.username = "User_" + nodeId.substring(0,4);
+        this.publicKeyBase64 = null;
     }
 
-    void updateLastSeen(InetSocketAddress currentAddr) {
+    // Added public getters for registry access
+    public String getNodeId() { return nodeId; }
+    public String getUsername() { return username; }
+    public String getPublicKeyBase64() { return publicKeyBase64; }
+    public List<Endpoint> getEndpoints() { return endpoints; } // Returns thread-safe list directly
+    public InetSocketAddress getLastAddr() { return lastAddr; }
+    public long getLastSeen() { return lastSeen; }
+
+    // Added public setters needed by registry/handlers
+    public void setUsername(String username) { this.username = username; }
+    public void setPublicKeyBase64(String publicKeyBase64) { this.publicKeyBase64 = publicKeyBase64; }
+
+    public void updateLastSeen(InetSocketAddress currentAddr) {
         this.lastSeen = Instant.now().toEpochMilli();
         this.lastAddr = currentAddr;
     }
 
-    // Tries to find or add/update the public endpoint based on the address server saw
-    void updatePublicEndpoint(InetSocketAddress publicAddr) {
+    public void updatePublicEndpoint(InetSocketAddress publicAddr) {
         if (publicAddr == null || publicAddr.getAddress() == null) {
             System.err.println("[!] Invalid publicAddr provided to updatePublicEndpoint for node " + nodeId);
             return;
@@ -44,13 +51,11 @@ class NodeInfo { // Keep package-private
         int publicPort = publicAddr.getPort();
         String type = "public_" + (publicAddr.getAddress() instanceof Inet6Address ? "v6" : "v4") + "_seen";
 
-        // Clean ::ffff: prefix if present (IPv4 mapped IPv6)
         if (publicAddr.getAddress() instanceof Inet6Address && publicIp != null && publicIp.startsWith("::ffff:")) {
             publicIp = publicIp.substring("::ffff:".length());
-            type = "public_v4_seen"; // Treat as v4
+            type = "public_v4_seen";
         }
 
-        // Sanity check IP and Port
         if (publicIp == null || publicIp.isEmpty() || publicPort <= 0 || publicPort > 65535) {
              System.err.println("[!] Invalid IP/Port derived from publicAddr for update: " + publicIp + ":" + publicPort);
              return;
@@ -59,9 +64,7 @@ class NodeInfo { // Keep package-private
         boolean found = false;
         for (Endpoint ep : endpoints) {
             if (ep.type != null && ep.type.equals(type)) {
-                // Only update if IP or port actually changed
                 if (!ep.ip.equals(publicIp) || ep.port != publicPort) {
-                    // System.out.println("    Updating existing " + type + " for " + nodeId + " from " + ep.ip + ":" + ep.port + " to " + publicIp + ":" + publicPort); // Less noisy
                     ep.ip = publicIp;
                     ep.port = publicPort;
                 }
@@ -71,21 +74,19 @@ class NodeInfo { // Keep package-private
         }
         if (!found) {
             Endpoint newPublicEp = new Endpoint(publicIp, publicPort, type);
-            endpoints.add(0, newPublicEp); // Add to beginning
-            // System.out.println("    Added new " + type + " for " + nodeId + ": " + publicIp + ":" + publicPort); // Less noisy
+            endpoints.add(0, newPublicEp);
         }
     }
 
-    Endpoint getPublicEndpointSeen() {
-        // Prefer IPv4 public seen if available, otherwise take first public seen one
+    public Endpoint getPublicEndpointSeen() {
         Endpoint ipv4Public = null;
         Endpoint firstPublic = null;
         for (Endpoint ep : endpoints) {
             if (ep.type != null && ep.type.contains("_seen")) {
-                if (firstPublic == null) firstPublic = ep; // Grab the first one found
+                if (firstPublic == null) firstPublic = ep;
                 if (ep.type.equals("public_v4_seen")) {
                     ipv4Public = ep;
-                    break; // Found IPv4, prefer this
+                    break;
                 }
             }
         }

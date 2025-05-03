@@ -3,19 +3,18 @@ package main.java.com.p2pchat.common;
 import org.json.JSONObject;
 import java.util.Objects;
 
-// Represents an endpoint (IP/Port/Type) - moved to common package
-public class Endpoint { // Made public for access from other packages
-    public String ip;     // Made public for easier access or add getters
-    public int port;    // Made public or add getters
-    public String type;   // Made public or add getters
+public class Endpoint {
+    public String ip;
+    public int port;
+    public String type;
 
-    public Endpoint(String ip, int port, String type) { // Made public
+    public Endpoint(String ip, int port, String type) {
         this.ip = ip;
         this.port = port;
         this.type = type;
     }
 
-    public JSONObject toJson() { // Made public
+    public JSONObject toJson() {
         JSONObject obj = new JSONObject();
         obj.put("ip", ip);
         obj.put("port", port);
@@ -23,11 +22,10 @@ public class Endpoint { // Made public for access from other packages
         return obj;
     }
 
-    public static Endpoint fromJson(JSONObject obj) { // Made public
+    public static Endpoint fromJson(JSONObject obj) {
         if (obj == null || !obj.has("ip") || !obj.has("port") || !obj.has("type")) {
             return null;
         }
-        // Basic validation - consider adding more robust checks (e.g., valid IP format, port range)
         try {
             String ip = obj.getString("ip");
             int port = obj.getInt("port");
@@ -49,7 +47,6 @@ public class Endpoint { // Made public for access from other packages
         return type + " " + ip + ":" + port;
     }
 
-    // Added equals and hashCode for potential use in Sets or Maps if needed
     @Override
     public boolean equals(Object o) {
         if (this == o) return true;
