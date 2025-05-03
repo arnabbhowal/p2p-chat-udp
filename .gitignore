@@ -18,3 +18,7 @@ Thumbs.db
 *.vscode/
 target/
 build/
+
+
+# Chat history logs (CSV files)
+chat_history/
