@@ -1,10 +1,12 @@
 package main.java.com.p2pchat.node.ui;
 
 import main.java.com.p2pchat.node.config.NodeConfig;
+import main.java.com.p2pchat.node.model.FileTransferState; // Added
 import main.java.com.p2pchat.node.model.NodeContext;
 import main.java.com.p2pchat.node.model.NodeState;
 import main.java.com.p2pchat.node.service.ChatService;
 import main.java.com.p2pchat.node.service.ConnectionService;
+import main.java.com.p2pchat.node.service.FileTransferService; // Added
 
 import java.net.InetSocketAddress;
 import java.time.Instant;
@@ -16,13 +18,16 @@ public class CommandLineInterface implements Runnable {
     private final NodeContext context;
     private final ConnectionService connectionService;
     private final ChatService chatService;
+    private final FileTransferService fileTransferService; // Added
     private final Scanner scanner;
     private long lastStatePrintTime = 0;
 
-    public CommandLineInterface(NodeContext context, ConnectionService connectionService, ChatService chatService) {
+    // Updated constructor
+    public CommandLineInterface(NodeContext context, ConnectionService connectionService, ChatService chatService, FileTransferService fileTransferService) {
         this.context = context;
         this.connectionService = connectionService;
         this.chatService = chatService;
+        this.fileTransferService = fileTransferService; // Added
         this.scanner = new Scanner(System.in); // Scanner for user input
     }
 
@@ -37,7 +42,10 @@ public class CommandLineInterface implements Runnable {
             while (context.running.get()) {
                  // Check if an async message requested a prompt redraw
                  // We just clear the flag; the prompt is always printed below.
-                 context.redrawPrompt.compareAndSet(true, false);
+                 if (context.redrawPrompt.compareAndSet(true, false)) {
+                     // If redraw was needed, print a newline before the prompt for clarity
+                     System.out.println();
+                 }
 
                  NodeState stateNow = context.currentState.get();
                  printStateUpdateIfNeeded(stateNow); // Print periodic status if needed
@@ -76,24 +84,24 @@ public class CommandLineInterface implements Runnable {
 
         String[] parts = line.split(" ", 2);
         String command = parts[0].toLowerCase();
-        String argument = (parts.length > 1) ? parts[1] : null;
+        String argument = (parts.length > 1) ? parts[1].trim() : null; // Trim argument
 
         switch (command) {
             case "quit":
             case "exit":
                 System.out.println("[*] Quit command received. Initiating shutdown...");
                 context.running.set(false);
-                System.exit(0); // Force exit
+                // Let shutdown hook handle cleanup System.exit(0); // Force exit? maybe not needed if shutdown is clean
                 break;
             case "connect":
                 if (stateNow == NodeState.DISCONNECTED) {
                     if (argument != null && !argument.isEmpty()) {
-                        connectionService.initiateConnection(argument.trim());
+                        connectionService.initiateConnection(argument);
                     } else System.out.println("[!] Usage: connect <peer_node_id>");
                 } else System.out.println("[!] Already connecting or connected. Disconnect first ('disconnect').");
                 break;
             case "disconnect":
-            case "cancel":
+            case "cancel": // Also use cancel for disconnecting/stopping attempts
                 if (stateNow == NodeState.CONNECTED_SECURE) {
                      connectionService.disconnectPeer();
                 } else if (stateNow == NodeState.WAITING_MATCH || stateNow == NodeState.ATTEMPTING_UDP) {
@@ -110,9 +118,36 @@ public class CommandLineInterface implements Runnable {
                      System.out.println("[!] Waiting for secure connection to be established...");
                 } else System.out.println("[!] Not connected to a peer. Use 'connect <peer_id>' first.");
                 break;
+
+            // --- File Transfer Commands ---
+            case "send":
+                 if (stateNow == NodeState.CONNECTED_SECURE) {
+                      if (argument != null && !argument.isEmpty()) {
+                           fileTransferService.initiateTransfer(argument); // Pass filepath
+                      } else System.out.println("[!] Usage: send <path/to/your/file>");
+                 } else System.out.println("[!] Not connected to a peer. Use 'connect <peer_id>' first.");
+                 break;
+            case "accept":
+                 if (stateNow == NodeState.CONNECTED_SECURE) {
+                      if (argument != null && !argument.isEmpty()) {
+                           fileTransferService.respondToOffer(argument, true); // Pass transfer ID
+                      } else System.out.println("[!] Usage: accept <transfer_id>");
+                 } else System.out.println("[!] Not connected to a peer.");
+                 break;
+             case "reject":
+                  if (stateNow == NodeState.CONNECTED_SECURE) {
+                       if (argument != null && !argument.isEmpty()) {
+                            fileTransferService.respondToOffer(argument, false); // Pass transfer ID
+                       } else System.out.println("[!] Usage: reject <transfer_id>");
+                  } else System.out.println("[!] Not connected to a peer.");
+                  break;
+             // --- End File Transfer Commands ---
+
             case "status":
             case "s": // Added short alias for status
                 System.out.println(getStateDescription(stateNow));
+                 // Also print ongoing transfer status
+                 printTransferStatus();
                 break;
             case "id":
                 System.out.println("[*] Your Username: " + context.myUsername);
@@ -122,13 +157,35 @@ public class CommandLineInterface implements Runnable {
                  // If connected, unknown commands are invalid.
                  // If disconnected, also invalid.
                  if (stateNow == NodeState.CONNECTED_SECURE) {
-                    System.out.println("[!] Unknown command. Use 'chat <message>' to send.");
+                     // Check if it's a chat message without the 'chat' prefix
+                      if (!command.isEmpty()) { // Treat non-empty unknown input as chat
+                          chatService.sendChatMessage(line); // Send the whole line as message
+                      } else {
+                           System.out.println("[!] Unknown command. Use 'chat <message>', 'send <file>', 'accept <id>', 'reject <id>', 'disconnect', 'status', 'quit'.");
+                      }
                  } else {
                     System.out.println("[!] Unknown command. Available: connect, status, id, quit");
                  }
                 break;
         }
     }
+
+     // Print status of ongoing file transfers
+     private void printTransferStatus() {
+         if (!context.ongoingTransfers.isEmpty()) {
+              System.out.println("--- Ongoing File Transfers ---");
+              context.ongoingTransfers.forEach((id, state) -> {
+                   String direction = state.isSender ? "Sending" : "Receiving";
+                   String progress = "";
+                   if (state.status == FileTransferState.Status.TRANSFERRING_RECV || state.status == FileTransferState.Status.TRANSFERRING_SEND) {
+                        double percent = (state.filesize > 0) ? (100.0 * state.transferredBytes.get() / state.filesize) : 0.0;
+                        progress = String.format(" (%.1f%%)", percent);
+                   }
+                   System.out.println("  ID: " + id.substring(0, 8) + "... | " + direction + " '" + state.filename + "' | Status: " + state.status + progress);
+              });
+              System.out.println("----------------------------");
+         }
+     }
 
     private void printStateUpdateIfNeeded(NodeState stateNow) {
          long now = Instant.now().toEpochMilli();
@@ -146,11 +203,15 @@ public class CommandLineInterface implements Runnable {
     private String getPrompt(NodeState stateNow) {
         String peerName = context.getPeerDisplayName();
         switch (stateNow) {
-            case DISCONNECTED: return "[?] Enter 'connect <peer_id>', 'status', 'id', 'quit': ";
-            case WAITING_MATCH: return "[Waiting:" + peerName + "] ('cancel'/'disconnect')> ";
-            case ATTEMPTING_UDP: return "[Pinging:" + peerName + "] ('cancel'/'disconnect')> ";
-            // Changed prompt to reflect chat command requirement
-            case CONNECTED_SECURE: return "[Chat 🔒 " + peerName + "] ('chat <msg>', 'disconnect', 'status', 'quit'): ";
+            case DISCONNECTED: return "[?] Enter 'connect', 'status', 'id', 'quit': ";
+            case WAITING_MATCH: return "[Waiting:" + peerName + "] ('cancel')> ";
+            case ATTEMPTING_UDP: return "[Pinging:" + peerName + "] ('cancel')> ";
+            case CONNECTED_SECURE:
+                // Show if there are pending file offers
+                 boolean hasPendingOffer = context.ongoingTransfers.values().stream()
+                                                 .anyMatch(s -> !s.isSender && s.status == FileTransferState.Status.OFFER_RECEIVED);
+                 String fileOfferIndicator = hasPendingOffer ? " FILE! |" : "";
+                 return "[Chat 🔒 " + peerName + fileOfferIndicator + "] (chat, send, accept, reject, disconnect, status, quit): ";
             case REGISTERING: return "[Registering...]> ";
             case INITIALIZING: return "[Initializing...]> ";
             case SHUTTING_DOWN: return "[Shutting down...]> ";

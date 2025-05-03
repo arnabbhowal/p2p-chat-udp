@@ -3,16 +3,18 @@ package main.java.com.p2pchat.node.model;
 import main.java.com.p2pchat.common.Endpoint;
 import main.java.com.p2pchat.node.service.ChatHistoryManager;
 
-
 import javax.crypto.SecretKey;
 import java.net.DatagramSocket;
 import java.net.InetSocketAddress;
 import java.security.KeyPair;
 import java.util.List;
+import java.util.Map; // Added for Map import
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.ArrayList;
+
 
 // Holds the shared state of the P2P Node
 public class NodeContext {
@@ -43,13 +45,17 @@ public class NodeContext {
     public final AtomicBoolean p2pUdpPathConfirmed = new AtomicBoolean(false);   // Ping/Pong worked
     public final AtomicBoolean sharedKeyEstablished = new AtomicBoolean(false); // Symmetric key derived
     public final AtomicBoolean running = new AtomicBoolean(true); // Overall node running flag
-    public final AtomicBoolean redrawPrompt = new AtomicBoolean(false); // *** NEW: Flag to signal UI prompt redraw ***
+    public final AtomicBoolean redrawPrompt = new AtomicBoolean(false); // Flag to signal UI prompt redraw
 
     public long waitingSince = 0; // Timestamp for timeouts
     public int pingAttempts = 0; // Counter for pinging phase
 
     // Services / Managers
     public ChatHistoryManager chatHistoryManager = null; // Initialized on connection
+
+    // --- File Transfer State ---
+    public final ConcurrentHashMap<String, FileTransferState> ongoingTransfers = new ConcurrentHashMap<>();
+    // --- End File Transfer State ---
 
     // Lock for complex state transitions if needed, though atomics handle most
     public final Object stateLock = new Object();
@@ -61,6 +67,10 @@ public class NodeContext {
         if (peerId != null) {
             peerSymmetricKeys.remove(peerId);
             System.out.println("[*] Cleared session key for peer " + peerId);
+
+            // --- Cancel any ongoing file transfers with this peer ---
+            cancelAndCleanupTransfersForPeer(peerId, "Disconnected");
+            // --- End file transfer cleanup ---
         }
 
         targetPeerId.set(null);
@@ -81,6 +91,29 @@ public class NodeContext {
         }
         System.out.println("[*] Reset connection state variables.");
     }
+
+    // --- Helper method for cleaning up transfers ---
+    public void cancelAndCleanupTransfersForPeer(String peerId, String reason) {
+        List<String> transfersToRemove = new ArrayList<>();
+        for (Map.Entry<String, FileTransferState> entry : ongoingTransfers.entrySet()) {
+            if (entry.getValue().peerNodeId.equals(peerId)) {
+                FileTransferState state = entry.getValue();
+                if (!state.isTerminated()) {
+                    state.status = FileTransferState.Status.CANCELLED; // Mark as cancelled
+                    state.closeStreams(); // Ensure streams are closed
+                    System.out.println("[FileTransfer] Cancelled transfer " + state.transferId + " with peer " + peerId + " due to: " + reason);
+                }
+                transfersToRemove.add(entry.getKey());
+            }
+        }
+        // Remove them outside the loop to avoid ConcurrentModificationException
+        transfersToRemove.forEach(ongoingTransfers::remove);
+        if (!transfersToRemove.isEmpty()) {
+            redrawPrompt.set(true); // Update UI as transfers were cancelled
+        }
+    }
+    // --- End helper method ---
+
 
     public String getPeerDisplayId() {
         String cPeer = connectedPeerId.get();
