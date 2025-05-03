@@ -29,10 +29,16 @@ public class CommandLineInterface implements Runnable {
     @Override
     public void run() {
         try {
-            // Initial messages moved to P2PNode main for clarity
-            // System.out.println("\n--- P2P Node Ready...");
+             // Print initial ready messages once after registration in P2PNode.main
+            System.out.println("\n--- P2P Node Ready (Username: " + context.myUsername + ", Node ID: " + context.myNodeId.get() + ") ---");
+            System.out.println("--- Enter 'connect <peer_id>', 'status', or 'quit' ---");
+
 
             while (context.running.get()) {
+                 // Check if an async message requested a prompt redraw
+                 // We just clear the flag; the prompt is always printed below.
+                 context.redrawPrompt.compareAndSet(true, false);
+
                  NodeState stateNow = context.currentState.get();
                  printStateUpdateIfNeeded(stateNow); // Print periodic status if needed
                  String prompt = getPrompt(stateNow); // Get the correct prompt
@@ -45,6 +51,9 @@ public class CommandLineInterface implements Runnable {
                       break;
                  }
                  String line = scanner.nextLine().trim();
+
+                 // Prompt redraw logic moved to the start of the loop
+
                  if (line.isEmpty()) continue; // Ignore empty input
 
                  processCommand(line); // Process the command read
@@ -57,31 +66,29 @@ public class CommandLineInterface implements Runnable {
             e.printStackTrace();
             context.running.set(false); // Stop on major UI errors
         } finally {
-            // Don't close System.in scanner here
             System.out.println("[*] User Interaction loop finished.");
         }
     }
 
 
     private void processCommand(String line) {
-        // Get current state *before* processing command
         NodeState stateNow = context.currentState.get();
 
         String[] parts = line.split(" ", 2);
         String command = parts[0].toLowerCase();
+        String argument = (parts.length > 1) ? parts[1] : null;
 
         switch (command) {
             case "quit":
             case "exit":
                 System.out.println("[*] Quit command received. Initiating shutdown...");
-                context.running.set(false); // Signal other threads to stop
-                // Force exit to match old behavior and ensure termination
-                System.exit(0);
-                break; // Technically unreachable due to exit, but good practice
+                context.running.set(false);
+                System.exit(0); // Force exit
+                break;
             case "connect":
                 if (stateNow == NodeState.DISCONNECTED) {
-                    if (parts.length > 1 && !parts[1].isEmpty()) {
-                        connectionService.initiateConnection(parts[1].trim());
+                    if (argument != null && !argument.isEmpty()) {
+                        connectionService.initiateConnection(argument.trim());
                     } else System.out.println("[!] Usage: connect <peer_node_id>");
                 } else System.out.println("[!] Already connecting or connected. Disconnect first ('disconnect').");
                 break;
@@ -94,17 +101,17 @@ public class CommandLineInterface implements Runnable {
                 } else System.out.println("[!] Not currently connected or attempting connection.");
                 break;
             case "chat":
-            case "c":
+            case "c": // Added short alias for chat
                 if (stateNow == NodeState.CONNECTED_SECURE) {
-                    if (parts.length > 1 && !parts[1].isEmpty()) chatService.sendChatMessage(parts[1]);
-                    else System.out.println("[!] Usage: chat <message>");
+                    if (argument != null && !argument.isEmpty()) {
+                         chatService.sendChatMessage(argument); // Pass only the message part
+                    } else System.out.println("[!] Usage: chat <message>");
                 } else if (stateNow == NodeState.ATTEMPTING_UDP || stateNow == NodeState.WAITING_MATCH) {
                      System.out.println("[!] Waiting for secure connection to be established...");
                 } else System.out.println("[!] Not connected to a peer. Use 'connect <peer_id>' first.");
                 break;
             case "status":
-            case "s":
-                // Print status immediately, without extra newline if prompt was just printed
+            case "s": // Added short alias for status
                 System.out.println(getStateDescription(stateNow));
                 break;
             case "id":
@@ -112,41 +119,38 @@ public class CommandLineInterface implements Runnable {
                 System.out.println("[*] Your Node ID: " + context.myNodeId.get());
                 break;
             default:
-                 // Allow sending messages directly if connected, without 'chat' prefix
+                 // If connected, unknown commands are invalid.
+                 // If disconnected, also invalid.
                  if (stateNow == NodeState.CONNECTED_SECURE) {
-                      chatService.sendChatMessage(line); // Treat the whole line as a message
+                    System.out.println("[!] Unknown command. Use 'chat <message>' to send.");
                  } else {
-                     System.out.println("[!] Unknown command. Available: connect, status, id, quit");
+                    System.out.println("[!] Unknown command. Available: connect, status, id, quit");
                  }
                 break;
         }
-         // Add a small delay to allow async messages (like state changes) to print before next prompt
-         try { Thread.sleep(50); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
     }
 
     private void printStateUpdateIfNeeded(NodeState stateNow) {
          long now = Instant.now().toEpochMilli();
-          // Periodic status printing for intermediate states
          if (stateNow == NodeState.WAITING_MATCH || stateNow == NodeState.ATTEMPTING_UDP) {
               if (now - lastStatePrintTime > NodeConfig.STATE_PRINT_INTERVAL_MS || lastStatePrintTime == 0) {
-                   // Use print instead of println to avoid extra blank line before prompt
-                   System.out.print("\n" + getStateDescription(stateNow) + "\n"); // Print with newline before/after
+                   System.out.print("\n" + getStateDescription(stateNow) + "\n");
                    lastStatePrintTime = now;
+                   context.redrawPrompt.set(true); // Force prompt redraw after status print
               }
          } else {
-             lastStatePrintTime = 0; // Reset timer if not in intermediate state
+             lastStatePrintTime = 0;
          }
     }
 
     private String getPrompt(NodeState stateNow) {
         String peerName = context.getPeerDisplayName();
         switch (stateNow) {
-            // Restored command hints to prompts
             case DISCONNECTED: return "[?] Enter 'connect <peer_id>', 'status', 'id', 'quit': ";
             case WAITING_MATCH: return "[Waiting:" + peerName + "] ('cancel'/'disconnect')> ";
             case ATTEMPTING_UDP: return "[Pinging:" + peerName + "] ('cancel'/'disconnect')> ";
-            // Added hints back here
-            case CONNECTED_SECURE: return "[Chat 🔒 " + peerName + "] ('disconnect', 'status', 'quit', or type message): ";
+            // Changed prompt to reflect chat command requirement
+            case CONNECTED_SECURE: return "[Chat 🔒 " + peerName + "] ('chat <msg>', 'disconnect', 'status', 'quit'): ";
             case REGISTERING: return "[Registering...]> ";
             case INITIALIZING: return "[Initializing...]> ";
             case SHUTTING_DOWN: return "[Shutting down...]> ";
@@ -156,7 +160,7 @@ public class CommandLineInterface implements Runnable {
 
     private String getStateDescription(NodeState stateNow) {
         String peerDisplay = context.getPeerDisplayName();
-        String fullPeerId = context.getPeerDisplayId(); // Get full ID for status
+        String fullPeerId = context.getPeerDisplayId();
 
         switch (stateNow) {
             case DISCONNECTED: return "[Status] Disconnected. Your Node ID: " + context.myNodeId.get() + " | Username: " + context.myUsername;

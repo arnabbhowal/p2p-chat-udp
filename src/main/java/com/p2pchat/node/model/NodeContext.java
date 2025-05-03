@@ -43,6 +43,7 @@ public class NodeContext {
     public final AtomicBoolean p2pUdpPathConfirmed = new AtomicBoolean(false);   // Ping/Pong worked
     public final AtomicBoolean sharedKeyEstablished = new AtomicBoolean(false); // Symmetric key derived
     public final AtomicBoolean running = new AtomicBoolean(true); // Overall node running flag
+    public final AtomicBoolean redrawPrompt = new AtomicBoolean(false); // *** NEW: Flag to signal UI prompt redraw ***
 
     public long waitingSince = 0; // Timestamp for timeouts
     public int pingAttempts = 0; // Counter for pinging phase
@@ -72,6 +73,7 @@ public class NodeContext {
         sharedKeyEstablished.set(false);
         pingAttempts = 0;
         waitingSince = 0;
+        redrawPrompt.set(false); // Reset redraw flag too
 
         if (chatHistoryManager != null) {
             System.out.println("[*] Chat history logging stopped.");

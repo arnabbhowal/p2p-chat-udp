@@ -2,13 +2,14 @@ package main.java.com.p2pchat.node.service;
 
 import main.java.com.p2pchat.common.CryptoUtils;
 import main.java.com.p2pchat.node.model.NodeContext;
-import main.java.com.p2pchat.node.model.NodeState; // Still needed for state check
+import main.java.com.p2pchat.node.model.NodeState; // Still needed for state check in sendChatMessage
 import main.java.com.p2pchat.node.network.NetworkManager;
 
 import org.json.JSONObject;
 import javax.crypto.SecretKey;
 // import java.net.InetSocketAddress; // No longer needed here
 import java.security.*;
+import java.security.spec.InvalidKeySpecException; // Added for catch block
 
 
 public class ChatService {
@@ -39,7 +40,8 @@ public class ChatService {
              System.out.println("[+] Shared symmetric key established successfully for peer " + peerId + "!");
              return true;
 
-         } catch (NoSuchAlgorithmException e) {
+         // Added InvalidKeySpecException catch which might be thrown by decodePublicKey
+         } catch (NoSuchAlgorithmException | InvalidKeyException | InvalidKeySpecException e) {
               System.err.println("[!] Cryptographic error during key exchange: " + e.getMessage());
          } catch (Exception e) {
               System.err.println("[!] Unexpected error during shared key generation: " + e.getMessage());
@@ -49,11 +51,10 @@ public class ChatService {
          return false;
      }
 
-    // Called by UI to send a message
+    // Called by UI to send a message (only if command is 'chat' or 'c')
     public void sendChatMessage(String message) {
         if (context.currentState.get() != NodeState.CONNECTED_SECURE) {
-             // Error message printed by UI command handler now
-             // System.out.println("[!] Cannot send chat message, not securely connected.");
+             // State check is done by the UI before calling this
              return;
         }
 
@@ -95,6 +96,7 @@ public class ChatService {
           if (sharedKey == null) {
                // Added newline for cleaner error printing
                System.err.println("\n[!] CRITICAL: No shared key found for connected peer " + context.getPeerDisplayName() + ". Cannot decrypt.");
+               // Should ideally disconnect here, but rely on ConnectionService/PeerMessageHandler for now
                return;
           }
 
@@ -102,17 +104,17 @@ public class ChatService {
          if (payload == null) {
               // Added newline
              System.err.println("\n[!] Received invalid encrypted chat payload from " + context.getPeerDisplayName());
+             context.redrawPrompt.set(true); // *** Signal redraw even on payload error ***
              return;
          }
          try {
              String decryptedMessage = CryptoUtils.decrypt(payload, sharedKey);
 
-             // --- Clean Printing Logic ---
-             // Simply use println to print the message on its own line.
-             // The UI loop's prompt will appear on the *next* line after this.
-             // Removed the '\r' (carriage return).
+             // Use println to print the message on its own line.
              System.out.println("[" + context.getPeerDisplayName() + "]: " + decryptedMessage);
 
+             // *** Signal the UI thread that the prompt might need redrawing ***
+             context.redrawPrompt.set(true);
 
              if (context.chatHistoryManager != null) {
                  long timestamp = System.currentTimeMillis();
@@ -123,9 +125,11 @@ public class ChatService {
          } catch (GeneralSecurityException e) {
               // Added newline for cleaner error printing
               System.err.println("\n[!] Failed to decrypt message from " + context.getPeerDisplayName() + ". " + e.getMessage());
+              context.redrawPrompt.set(true); // *** Signal redraw on decryption error ***
          } catch (Exception e) {
               // Added newline
              System.err.println("\n[!] Error handling decrypted message from " + context.getPeerDisplayName() + ": " + e.getMessage());
+             context.redrawPrompt.set(true); // *** Signal redraw on other errors ***
          }
      }
 }
