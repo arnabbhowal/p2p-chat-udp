@@ -45,29 +45,70 @@ public class PeerMessageHandler {
             handleMessageDuringAttempt(data, peerAddr, action, senderId);
         }
         // --- Processing After Secure Connection Established ---
+        // Allow processing file messages even if peerAddr doesn't perfectly match confirmedAddr,
+        // as NAT mappings might change. Rely on senderId for peer verification.
         else if (stateNow == NodeState.CONNECTED_SECURE && currentPeer != null && currentPeer.equals(senderId)) {
             handleMessageWhenConnected(data, peerAddr, action, senderId);
         }
-        // Ignore messages from unexpected peers or in other states for now
+        // --- Special Case: Allow file ACKs even if state slightly changes ---
+        // This might happen if connection drops right after receiving data
+        else if (action.equals("file_ack") && currentPeer != null && currentPeer.equals(senderId)) {
+             System.out.println("[?] Received file_ack from previously connected peer " + senderId + " after state change. Processing...");
+             handleMessageWhenConnected(data, peerAddr, action, senderId);
+        }
+
+        // Ignore messages from unexpected peers or in other states
     }
 
 
     private void handleMessageDuringAttempt(JSONObject data, InetSocketAddress peerAddr, String action, String senderId) {
          boolean senderIsCandidate = context.peerCandidates.stream().anyMatch(cand -> {
-             try { return new InetSocketAddress(InetAddress.getByName(cand.ip), cand.port).equals(peerAddr); }
+             try {
+                 // Compare IP address strings and ports
+                 InetAddress candAddr = InetAddress.getByName(cand.ip);
+                 // Handle IPv6 scope IDs if present in peerAddr
+                 String peerIpString = peerAddr.getAddress().getHostAddress();
+                  int scopeIndex = peerIpString.indexOf('%');
+                  if (scopeIndex > 0) peerIpString = peerIpString.substring(0, scopeIndex);
+
+                 return candAddr.getHostAddress().equals(peerIpString) && cand.port == peerAddr.getPort();
+             }
              catch (UnknownHostException e) { return false; }
          });
 
-        if (senderIsCandidate && (action.equals("ping") || action.equals("pong"))) {
+        // Allow PONG from public address even if not in candidates explicitly (server might know better)
+         boolean fromPublicSeen = false;
+         if (context.myPublicEndpointSeen != null) {
+              try {
+                  InetAddress pubAddr = InetAddress.getByName(context.myPublicEndpointSeen.ip);
+                   String peerIpString = peerAddr.getAddress().getHostAddress();
+                   int scopeIndex = peerIpString.indexOf('%');
+                   if (scopeIndex > 0) peerIpString = peerIpString.substring(0, scopeIndex);
+                  fromPublicSeen = pubAddr.getHostAddress().equals(peerIpString) && context.myPublicEndpointSeen.port == peerAddr.getPort();
+              } catch (UnknownHostException e) { /* ignore */ }
+         }
+
+
+        if ((senderIsCandidate || fromPublicSeen) && (action.equals("ping") || action.equals("pong"))) {
              synchronized (context.stateLock) {
                  if (context.currentState.get() != NodeState.ATTEMPTING_UDP) return; // Re-check state under lock
 
+                 // Try to set the confirmed address only once
                  boolean firstConfirmation = context.peerAddrConfirmed.compareAndSet(null, peerAddr);
                  if (firstConfirmation) {
-                     System.out.println("\n[*] CONFIRMED receiving directly from Peer " + senderId + " at " + peerAddr + "!");
-                     context.connectedPeerId.set(senderId); // Tentatively set connected ID
+                     System.out.println("\n[*] CONFIRMED receiving directly from Peer " + context.getPeerDisplayName() + " (" + senderId.substring(0,8) + ") at " + peerAddr + "!");
+                     // If targetPeerId is still set, update connectedPeerId
+                     if(senderId.equals(context.targetPeerId.get())) {
+                         context.connectedPeerId.set(senderId);
+                     }
+                 } else {
+                      // If we already confirmed an address but receive from another valid one, log it.
+                      if (!peerAddr.equals(context.peerAddrConfirmed.get())) {
+                           System.out.println("[?] Received valid ping/pong from alternate address " + peerAddr + " (already confirmed " + context.peerAddrConfirmed.get() + ")");
+                      }
                  }
 
+                 // Try to set the path confirmed flag only once
                  boolean firstPathConfirm = context.p2pUdpPathConfirmed.compareAndSet(false, true);
                  if (firstPathConfirm) {
                       System.out.println("[+] P2P UDP Path Confirmed (Received " + action.toUpperCase() + ")!");
@@ -84,10 +125,24 @@ public class PeerMessageHandler {
     private void handleMessageWhenConnected(JSONObject data, InetSocketAddress peerAddr, String action, String senderId) {
         InetSocketAddress confirmedAddr = context.peerAddrConfirmed.get();
 
-        if (confirmedAddr == null || !peerAddr.equals(confirmedAddr)) {
-            System.out.println("[?] WARNING: Received message from connected peer " + context.getPeerDisplayName() + " but from wrong address " + peerAddr + ". IGNORING.");
-            return;
+        // Relax address check slightly: only warn if address is different, but still process
+        if (confirmedAddr != null && !peerAddr.equals(confirmedAddr)) {
+             // Check if it's a local vs public mismatch which can happen with NAT reflection
+             boolean isLocalPeer = peerAddr.getAddress().isSiteLocalAddress() || peerAddr.getAddress().isLoopbackAddress();
+             boolean confirmedIsLocal = confirmedAddr.getAddress().isSiteLocalAddress() || confirmedAddr.getAddress().isLoopbackAddress();
+             if (isLocalPeer != confirmedIsLocal) {
+                  System.out.println("[?] NOTE: Received message from connected peer " + context.getPeerDisplayName() + " via different address " + peerAddr + " (Confirmed: " + confirmedAddr + "). Processing anyway.");
+             } else {
+                  // Otherwise, still warn but process
+                  System.out.println("[?] WARNING: Received message from connected peer " + context.getPeerDisplayName() + " but from unexpected address " + peerAddr + " (Confirmed: "+ confirmedAddr +"). Processing anyway.");
+             }
+             // Allow processing, relying on senderId and crypto for security.
+        } else if (confirmedAddr == null) {
+             System.out.println("[?] WARNING: Processing message from peer " + context.getPeerDisplayName() + " but confirmed address is null.");
+             // Maybe confirm the address now?
+             context.peerAddrConfirmed.compareAndSet(null, peerAddr);
         }
+
 
         switch (action) {
             // Chat actions
@@ -135,6 +190,7 @@ public class PeerMessageHandler {
     }
 
      private void sendPong(InetSocketAddress peerAddr) {
+         if (context.myNodeId.get() == null) return; // Don't send if unregistered
          JSONObject pongMsg = new JSONObject();
          pongMsg.put("action", "pong");
          pongMsg.put("node_id", context.myNodeId.get());

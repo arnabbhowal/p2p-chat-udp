@@ -14,7 +14,7 @@ public class NodeConfig {
 
     // --- File Transfer Config ---
     public static final String DOWNLOADS_DIR = "downloads";
-    public static final long MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024; // 10 MiB limit
+    public static final long MAX_FILE_SIZE_BYTES = 1 * 1024 * 1024; // 1 MiB limit
     public static final int FILE_CHUNK_SIZE = 1024; // Raw bytes per chunk before encryption
     public static final long FILE_ACK_TIMEOUT_MS = 2000; // Timeout for waiting for a file chunk ACK
     public static final int FILE_MAX_RETRIES = 5;      // Max times to resend a chunk before failing

@@ -28,10 +28,11 @@ public class P2PNode {
     private static CommandLineInterface commandLineInterface;
     private static RegistrationService registrationService;
     private static ChatService chatService;
+    private static volatile boolean isShuttingDown = false; // Flag to prevent double shutdown
 
     public static void main(String[] args) {
         // Set current time for testing purposes
-         String testDate = "2025-05-03T13:17:52-04:00"; // Approx time of request
+         // String testDate = "2025-05-03T14:43:03-04:00"; // Approx time of request
          // In real code, you'd use Instant.now() or similar
 
         if (args.length > 0 && args[0] != null && !args[0].trim().isEmpty()) {
@@ -47,6 +48,9 @@ public class P2PNode {
 
         nodeContext = new NodeContext();
         nodeContext.currentState.set(NodeState.INITIALIZING);
+
+        // Add shutdown hook EARLY before services are fully active
+        Runtime.getRuntime().addShutdownHook(new Thread(P2PNode::shutdown));
 
         // --- Initialization ---
         if (!resolveServerAddress()) return; // Exit if server address fails
@@ -64,25 +68,36 @@ public class P2PNode {
         // --- Registration ---
          if (!registrationService.registerWithServer()) {
               System.err.println("[!!!] Failed to register with server. Exiting.");
-              shutdown();
+              // Shutdown hook will run, but exit explicitly if registration fails critically
+              System.exit(1);
               return;
          }
          // Registration successful, state is now DISCONNECTED
+
+         // --- Print Ready Messages (Moved Here) ---
+         System.out.println("\n--- P2P Node Ready ---");
+         System.out.println("    Username: " + nodeContext.myUsername);
+         System.out.println("    Node ID : " + nodeContext.myNodeId.get());
+         System.out.println("--- Enter 'connect <peer_id>', 'status', 'id', or 'quit' ---");
+         // --- End Ready Messages ---
+
 
         // --- Start background services and UI ---
         connectionService.start(); // Start keepalives, pinging logic
         fileTransferService.start(); // Start file transfer timeout checker
         commandLineInterface = new CommandLineInterface(nodeContext, connectionService, chatService, fileTransferService); // Pass file transfer service
 
-        // Add shutdown hook AFTER essential services are created
-        Runtime.getRuntime().addShutdownHook(new Thread(P2PNode::shutdown));
 
          // Run the UI loop (this will block until quit or error)
-        commandLineInterface.run();
+         try {
+            commandLineInterface.run();
+         } finally {
+             // Ensure shutdown is called even if UI loop throws an exception
+             shutdown();
+         }
 
-        // --- Shutdown initiated by UI loop finishing ---
-        shutdown();
         System.out.println("[*] Node main method finished.");
+        // JVM will exit if all non-daemon threads (like main) are done
     }
 
     private static boolean resolveServerAddress() {
@@ -131,18 +146,26 @@ public class P2PNode {
         System.out.print("[?] Enter your desired username: ");
         Scanner inputScanner = new Scanner(System.in); // Use a temporary scanner for username only
         String inputName = "";
-        // Use default if no input stream available (e.g., testing)
+        // Check if running without an interactive console AND no immediate input
+        // Corrected line:
         if (System.console() == null && !inputScanner.hasNextLine()) {
-             System.out.println("\n[*] No interactive console detected. Using default username: " + nodeContext.myUsername);
+             System.out.println("\n[*] No interactive console detected or input stream closed. Using default username: " + nodeContext.myUsername);
              inputName = nodeContext.myUsername;
         } else {
              while (inputName == null || inputName.trim().isEmpty()) {
+                  // Check if running flag became false (e.g., shutdown initiated)
+                  if (!nodeContext.running.get()) {
+                      System.out.println("\n[*] Shutdown initiated during username input.");
+                      inputName = nodeContext.myUsername; // Use default
+                      break;
+                  }
                   if (inputScanner.hasNextLine()) {
                        inputName = inputScanner.nextLine().trim();
                        if (inputName.isEmpty()) {
                            System.out.print("[!] Username cannot be empty. Please enter a username: ");
                        }
                   } else {
+                       // This case handles if the input stream closes unexpectedly while waiting
                        System.out.println("\n[*] Input stream closed during username entry. Using default.");
                        inputName = nodeContext.myUsername; // Keep default
                        break;
@@ -151,25 +174,32 @@ public class P2PNode {
         }
          nodeContext.myUsername = inputName.trim(); // Ensure trimmed
          System.out.println("[*] Username set to: " + nodeContext.myUsername);
-         // Don't close System.in scanner if it wasn't the temporary one
+         // We don't close the scanner wrapping System.in
     }
 
 
     private static synchronized void shutdown() {
-        if (nodeContext == null || !nodeContext.running.get()) return; // Already shut down or not initialized
+        // Prevent shutdown() from running multiple times (e.g., from hook and main thread finally block)
+        if (isShuttingDown) return;
+        isShuttingDown = true;
 
-         System.out.println("\n[*] Shutting down node...");
-         nodeContext.running.set(false); // Signal all loops to stop
-         nodeContext.currentState.set(NodeState.SHUTTING_DOWN);
+        System.out.println("\n[*] Shutting down node...");
 
+        // Signal all loops to stop FIRST
+        if (nodeContext != null) {
+            nodeContext.running.set(false);
+            nodeContext.currentState.set(NodeState.SHUTTING_DOWN);
+        }
 
-        // Stop services that have background threads first
-         if (fileTransferService != null) { // Added
-             fileTransferService.stop();
+        // Stop services that have background threads
+        // Order might matter slightly - stop accepting new work before stopping listeners
+         if (fileTransferService != null) {
+             fileTransferService.stop(); // Stops timeout checker
          }
         if (connectionService != null) {
-            connectionService.stop();
+            connectionService.stop(); // Stops connection manager thread
         }
+        // Stop network listener last, after other services signal they are stopping
         if (networkManager != null) {
             networkManager.stop(); // Stops listener thread and closes socket
         }
@@ -187,7 +217,8 @@ public class P2PNode {
              System.out.println("[*] Cleared cryptographic keys.");
          }
 
-
         System.out.println("[*] Node shutdown sequence complete.");
+        // Don't call System.exit() here; let the main thread finish naturally
+        // The shutdown hook ensures this runs even if the main thread is interrupted.
     }
 }
