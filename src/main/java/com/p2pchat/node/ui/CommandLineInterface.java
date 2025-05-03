@@ -29,24 +29,25 @@ public class CommandLineInterface implements Runnable {
     @Override
     public void run() {
         try {
-            System.out.println("\n--- P2P Node Ready (Username: " + context.myUsername + ", Node ID: " + context.myNodeId.get() + ") ---");
-            System.out.println("--- Enter 'connect <peer_id>', 'status', or 'quit' ---");
+            // Initial messages moved to P2PNode main for clarity
+            // System.out.println("\n--- P2P Node Ready...");
 
             while (context.running.get()) {
                  NodeState stateNow = context.currentState.get();
-                 printStateUpdateIfNeeded(stateNow);
-                 String prompt = getPrompt(stateNow);
-                 System.out.print(prompt); // Print prompt
+                 printStateUpdateIfNeeded(stateNow); // Print periodic status if needed
+                 String prompt = getPrompt(stateNow); // Get the correct prompt
+                 System.out.print(prompt); // Display the prompt
 
+                 // Wait for and read user input
                  if (!scanner.hasNextLine()) {
                       System.out.println("\n[*] Input stream closed. Exiting.");
                       context.running.set(false); // Signal shutdown
                       break;
                  }
                  String line = scanner.nextLine().trim();
-                 if (line.isEmpty()) continue;
+                 if (line.isEmpty()) continue; // Ignore empty input
 
-                 processCommand(line, stateNow);
+                 processCommand(line); // Process the command read
             }
         } catch (NoSuchElementException e) {
              System.out.println("\n[*] Input stream ended unexpectedly. Shutting down.");
@@ -62,13 +63,9 @@ public class CommandLineInterface implements Runnable {
     }
 
 
-    private void processCommand(String line, NodeState stateBeforeCommand) {
-        // Re-check state in case it changed while waiting for input
+    private void processCommand(String line) {
+        // Get current state *before* processing command
         NodeState stateNow = context.currentState.get();
-         if (stateNow != stateBeforeCommand) {
-             System.out.println("\n[*] State changed ("+ stateBeforeCommand +" -> "+ stateNow +"). Please check 'status' and retry command.");
-             return;
-         }
 
         String[] parts = line.split(" ", 2);
         String command = parts[0].toLowerCase();
@@ -78,8 +75,9 @@ public class CommandLineInterface implements Runnable {
             case "exit":
                 System.out.println("[*] Quit command received. Initiating shutdown...");
                 context.running.set(false); // Signal other threads to stop
-                // Main thread will handle actual shutdown
-                break;
+                // Force exit to match old behavior and ensure termination
+                System.exit(0);
+                break; // Technically unreachable due to exit, but good practice
             case "connect":
                 if (stateNow == NodeState.DISCONNECTED) {
                     if (parts.length > 1 && !parts[1].isEmpty()) {
@@ -106,6 +104,7 @@ public class CommandLineInterface implements Runnable {
                 break;
             case "status":
             case "s":
+                // Print status immediately, without extra newline if prompt was just printed
                 System.out.println(getStateDescription(stateNow));
                 break;
             case "id":
@@ -113,10 +112,16 @@ public class CommandLineInterface implements Runnable {
                 System.out.println("[*] Your Node ID: " + context.myNodeId.get());
                 break;
             default:
-                 if (stateNow == NodeState.CONNECTED_SECURE) System.out.println("[!] Unknown command. Available: chat, disconnect, status, quit");
-                 else System.out.println("[!] Unknown command. Available: connect, status, id, quit");
+                 // Allow sending messages directly if connected, without 'chat' prefix
+                 if (stateNow == NodeState.CONNECTED_SECURE) {
+                      chatService.sendChatMessage(line); // Treat the whole line as a message
+                 } else {
+                     System.out.println("[!] Unknown command. Available: connect, status, id, quit");
+                 }
                 break;
         }
+         // Add a small delay to allow async messages (like state changes) to print before next prompt
+         try { Thread.sleep(50); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
     }
 
     private void printStateUpdateIfNeeded(NodeState stateNow) {
@@ -124,7 +129,8 @@ public class CommandLineInterface implements Runnable {
           // Periodic status printing for intermediate states
          if (stateNow == NodeState.WAITING_MATCH || stateNow == NodeState.ATTEMPTING_UDP) {
               if (now - lastStatePrintTime > NodeConfig.STATE_PRINT_INTERVAL_MS || lastStatePrintTime == 0) {
-                   System.out.println("\n" + getStateDescription(stateNow)); // Print with newline
+                   // Use print instead of println to avoid extra blank line before prompt
+                   System.out.print("\n" + getStateDescription(stateNow) + "\n"); // Print with newline before/after
                    lastStatePrintTime = now;
               }
          } else {
@@ -135,10 +141,12 @@ public class CommandLineInterface implements Runnable {
     private String getPrompt(NodeState stateNow) {
         String peerName = context.getPeerDisplayName();
         switch (stateNow) {
-            case DISCONNECTED: return "[?] Enter command: ";
-            case WAITING_MATCH: return "[Waiting:" + peerName + "] ('cancel')> ";
-            case ATTEMPTING_UDP: return "[Pinging:" + peerName + "] ('cancel')> ";
-            case CONNECTED_SECURE: return "[Chat 🔒 " + peerName + "]> ";
+            // Restored command hints to prompts
+            case DISCONNECTED: return "[?] Enter 'connect <peer_id>', 'status', 'id', 'quit': ";
+            case WAITING_MATCH: return "[Waiting:" + peerName + "] ('cancel'/'disconnect')> ";
+            case ATTEMPTING_UDP: return "[Pinging:" + peerName + "] ('cancel'/'disconnect')> ";
+            // Added hints back here
+            case CONNECTED_SECURE: return "[Chat 🔒 " + peerName + "] ('disconnect', 'status', 'quit', or type message): ";
             case REGISTERING: return "[Registering...]> ";
             case INITIALIZING: return "[Initializing...]> ";
             case SHUTTING_DOWN: return "[Shutting down...]> ";

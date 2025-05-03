@@ -2,12 +2,12 @@ package main.java.com.p2pchat.node.service;
 
 import main.java.com.p2pchat.common.CryptoUtils;
 import main.java.com.p2pchat.node.model.NodeContext;
-import main.java.com.p2pchat.node.model.NodeState;
+import main.java.com.p2pchat.node.model.NodeState; // Still needed for state check
 import main.java.com.p2pchat.node.network.NetworkManager;
 
 import org.json.JSONObject;
 import javax.crypto.SecretKey;
-import java.net.InetSocketAddress;
+// import java.net.InetSocketAddress; // No longer needed here
 import java.security.*;
 
 
@@ -52,17 +52,17 @@ public class ChatService {
     // Called by UI to send a message
     public void sendChatMessage(String message) {
         if (context.currentState.get() != NodeState.CONNECTED_SECURE) {
-             System.out.println("[!] Cannot send chat message, not securely connected.");
+             // Error message printed by UI command handler now
+             // System.out.println("[!] Cannot send chat message, not securely connected.");
              return;
         }
 
-        InetSocketAddress peerAddr = context.peerAddrConfirmed.get();
+        java.net.InetSocketAddress peerAddr = context.peerAddrConfirmed.get();
         String peerId = context.connectedPeerId.get();
         SecretKey sharedKey = (peerId != null) ? context.peerSymmetricKeys.get(peerId) : null;
 
         if (peerAddr == null || peerId == null || sharedKey == null) {
-             System.out.println("[!] Cannot send chat message: Missing peer address, ID, or key.");
-              // Consider triggering disconnect? For now just log.
+             System.out.println("\n[!] Cannot send chat message: Missing peer address, ID, or key."); // Add newline for clarity
              return;
         }
 
@@ -79,13 +79,12 @@ public class ChatService {
 
             if (sent && context.chatHistoryManager != null) {
                 long timestamp = System.currentTimeMillis();
-                // Log the original plaintext message
                 context.chatHistoryManager.addMessage(timestamp, peerId, context.connectedPeerUsername.get(), "SENT", message);
             }
-            if (!sent) System.out.println("[!] Failed to send chat message. Connection might be lost.");
+            if (!sent) System.out.println("\n[!] Failed to send chat message. Connection might be lost."); // Add newline
 
-        } catch (GeneralSecurityException e) { System.err.println("[!] Failed to encrypt message: " + e.getMessage());
-        } catch (Exception e) { System.err.println("[!] Unexpected error sending chat message: " + e.getMessage()); }
+        } catch (GeneralSecurityException e) { System.err.println("\n[!] Failed to encrypt message: " + e.getMessage()); // Add newline
+        } catch (Exception e) { System.err.println("\n[!] Unexpected error sending chat message: " + e.getMessage()); } // Add newline
     }
 
      // Called by PeerMessageHandler when e_chat received
@@ -94,22 +93,25 @@ public class ChatService {
          SecretKey sharedKey = (peerId != null) ? context.peerSymmetricKeys.get(peerId) : null;
 
           if (sharedKey == null) {
-               System.err.println("[!] CRITICAL: No shared key found for connected peer " + context.getPeerDisplayName() + ". Cannot decrypt. Disconnecting.");
-               // This case should ideally be prevented by state checks, but handle defensively.
-                // connectionService.handleConnectionLoss(); // Let PeerMessageHandler trigger this if needed
+               // Added newline for cleaner error printing
+               System.err.println("\n[!] CRITICAL: No shared key found for connected peer " + context.getPeerDisplayName() + ". Cannot decrypt.");
                return;
           }
 
          CryptoUtils.EncryptedPayload payload = CryptoUtils.EncryptedPayload.fromJson(data);
          if (payload == null) {
-             System.err.println("[!] Received invalid encrypted chat payload from " + context.getPeerDisplayName());
+              // Added newline
+             System.err.println("\n[!] Received invalid encrypted chat payload from " + context.getPeerDisplayName());
              return;
          }
          try {
              String decryptedMessage = CryptoUtils.decrypt(payload, sharedKey);
 
-             // Print message cleanly (handled by CommandLineInterface)
-             System.out.print("\r[" + context.getPeerDisplayName() + "]: " + decryptedMessage + "\n"); // Direct print for now
+             // --- Clean Printing Logic ---
+             // Simply use println to print the message on its own line.
+             // The UI loop's prompt will appear on the *next* line after this.
+             // Removed the '\r' (carriage return).
+             System.out.println("[" + context.getPeerDisplayName() + "]: " + decryptedMessage);
 
 
              if (context.chatHistoryManager != null) {
@@ -119,10 +121,11 @@ public class ChatService {
              }
 
          } catch (GeneralSecurityException e) {
-              System.err.println("[!] Failed to decrypt message from " + context.getPeerDisplayName() + ". " + e.getMessage());
-              // Potential tampering or key mismatch
+              // Added newline for cleaner error printing
+              System.err.println("\n[!] Failed to decrypt message from " + context.getPeerDisplayName() + ". " + e.getMessage());
          } catch (Exception e) {
-             System.err.println("[!] Error handling decrypted message from " + context.getPeerDisplayName() + ": " + e.getMessage());
+              // Added newline
+             System.err.println("\n[!] Error handling decrypted message from " + context.getPeerDisplayName() + ": " + e.getMessage());
          }
      }
 }
