@@ -24,7 +24,8 @@ public interface GuiCallback {
     void updateState(NodeState newState, String peerUsername, String peerNodeId);
 
     /**
-     * Appends a message (chat, system, error) to the main chat/log area.
+     * Appends a CHAT message (from user or peer) to the main chat display area.
+     * Use displaySystemMessage for non-chat status/log messages.
      * @param message The message string to display.
      */
     void appendMessage(String message);
@@ -62,4 +63,11 @@ public interface GuiCallback {
       * Called typically on disconnect or shutdown.
       */
      void clearFileProgress();
+
+     /**
+      * Displays a system-level message (e.g., status updates, internal events).
+      * Distinct from user chat messages. Can be logged differently (e.g., console).
+      * @param message The system message string.
+      */
+     void displaySystemMessage(String message); // <<< Added method
 }

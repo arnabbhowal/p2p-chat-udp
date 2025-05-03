@@ -112,16 +112,16 @@ public class P2PNode {
             // --- Perform Network/Registration Tasks Off EDT ---
             new Thread(() -> {
                 try {
-                    gui.appendMessage("System: Discovering local endpoints...");
+                    gui.displaySystemMessage("System: Discovering local endpoints...");
                     registrationService.discoverLocalEndpoints();
 
-                    gui.appendMessage("System: Network listener starting...");
+                    gui.displaySystemMessage("System: Network listener starting...");
                     networkManager.startListening();
-                    gui.appendMessage("System: Network listener started.");
+                    gui.displaySystemMessage("System: Network listener started.");
 
-                    gui.appendMessage("System: Registering with server...");
+                    gui.displaySystemMessage("System: Registering with server...");
                     if (!registrationService.registerWithServer()) {
-                        gui.appendMessage("System: [!!!] FAILED TO REGISTER WITH SERVER. Check server IP/status and restart.");
+                        gui.displaySystemMessage("System: [!!!] FAILED TO REGISTER WITH SERVER. Check server IP/status and restart.");
                         // Update state to reflect failure if registration fails
                         SwingUtilities.invokeLater(() -> gui.updateState(NodeState.DISCONNECTED, null, null));
                         // Don't start background tasks if registration failed
@@ -130,7 +130,7 @@ public class P2PNode {
                         // Start background service tasks ONLY after successful registration attempt
                         connectionService.start();
                         fileTransferService.start();
-                        gui.appendMessage("System: Ready. Use 'Connect' button.");
+                        gui.displaySystemMessage("System: Ready. Use 'Connect' button.");
                     }
                 } catch (Exception e) {
                     System.err.println("[!!!] Error during background initialization: " + e.getMessage());
@@ -187,8 +187,6 @@ public class P2PNode {
         }
     }
 
-    // Helper to set the callback on all relevant services
-    // *** ASSUMES setGuiCallback(GuiCallback) methods exist in these classes ***
     // Helper to set the callback on all relevant services
     // *** ASSUMES setGuiCallback(GuiCallback) methods exist in these classes ***
     private static void setGuiCallbackForAllServices(GuiCallback callback) {
