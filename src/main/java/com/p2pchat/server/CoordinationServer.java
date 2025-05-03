@@ -104,6 +104,7 @@ public class CoordinationServer {
                     nodesToRemove.add(nodeId);
                     Endpoint pubEp = nodeInfo.getPublicEndpointSeen();
                     String endpointStr = (pubEp != null) ? (pubEp.ip + ":" + pubEp.port) : "Unknown";
+                    // Removed truncation from log:
                     System.out.println("[-] Node " + nodeInfo.username + " (" + nodeId + ") timed out (Last seen: " + ((now - nodeInfo.lastSeen)/1000) + "s ago, Last Addr: " + endpointStr + "). Removing.");
                 }
             });
@@ -116,10 +117,12 @@ public class CoordinationServer {
                     boolean removedPendingFor = pendingConnections.values().removeIf(targetId -> targetId.equals(nodeId));
 
                     if (removedPendingBy || removedPendingFor) {
+                        // Removed truncation from log:
                         System.out.println("    - Cleared pending requests associated with " + nodeId);
                     }
                 }
-                System.out.println("[*] Cleanup complete. Current Nodes (" + nodes.size() + "): " + nodes.keySet());
+                 // Show full node IDs in list:
+                System.out.println("[*] Cleanup complete. Current Nodes (" + nodes.size() + "): " + String.join(", ", nodes.keySet()));
             }
         } catch (Exception e) {
             System.err.println("[!!!] Error during node cleanup task: " + e.getMessage());
@@ -138,7 +141,6 @@ public class CoordinationServer {
         String senderIp = senderAddr.getAddress().getHostAddress();
         int senderPort = senderAddr.getPort();
 
-        // Clean ::ffff: prefix if present
         boolean isIPv6 = senderAddr.getAddress() instanceof Inet6Address;
         if (isIPv6 && senderIp != null && senderIp.startsWith("::ffff:")) {
             senderIp = senderIp.substring("::ffff:".length());
@@ -154,26 +156,28 @@ public class CoordinationServer {
         }
 
         String action = data.optString("action", null);
-        String nodeId = data.optString("node_id", null); // Get node_id early
+        String nodeId = data.optString("node_id", null);
 
-        // --- Update last_seen for known nodes on any valid message ---
         NodeInfo nodeInfo = null;
         String usernameForLog = "???";
+        String nodeIdForLog = "???"; // For logging node ID
         if (nodeId != null) {
             nodeInfo = nodes.get(nodeId);
+            nodeIdForLog = nodeId; // Use full ID for logging if available
             if (nodeInfo != null) {
                 nodeInfo.updateLastSeen(senderAddr);
-                nodeInfo.updatePublicEndpoint(senderAddr); // Also update their perceived public endpoint
-                usernameForLog = nodeInfo.username; // Use known username for logging
+                nodeInfo.updatePublicEndpoint(senderAddr);
+                usernameForLog = nodeInfo.username;
             } else {
-                 usernameForLog = "Unknown:" + nodeId.substring(0, Math.min(8, nodeId.length())) + "...";
+                 // Keep log short for unknown nodes, but use full ID if provided
+                 usernameForLog = "Unknown:" + nodeId;
             }
         } else {
              usernameForLog = "NoNodeID";
+             nodeIdForLog = "N/A";
         }
-        // --- End Update ---
 
-        System.out.println("\n[+] UDP Received from [" + senderIp + "]:" + senderPort + " -> Action: " + (action != null ? action : "N/A") + " (Node: " + usernameForLog + ")");
+        // System.out.println("\n[+] UDP Received from [" + senderIp + "]:" + senderPort + " -> Action: " + (action != null ? action : "N/A") + " (Node: " + usernameForLog + " ID: "+nodeIdForLog+")"); // Less verbose logging
 
 
         if ("register".equals(action)) {
@@ -183,9 +187,7 @@ public class CoordinationServer {
         } else if ("request_connection".equals(action)) {
             handleConnectionRequest(data, senderAddr, nodeInfo); // Pass potentially found nodeInfo
         } else {
-            if (action == null) {
-                System.out.println("[?] Received message with no action from " + senderAddr);
-            } else {
+            if (action != null && !action.isEmpty()) {
                 System.out.println("[!] Unknown action '" + action + "' received from " + senderAddr);
             }
         }
@@ -195,52 +197,60 @@ public class CoordinationServer {
         String newNodeId = UUID.randomUUID().toString();
         NodeInfo newNodeInfo = new NodeInfo(newNodeId, senderAddr);
 
-        // Extract and store username
-        String username = data.optString("username", "User_" + newNodeId.substring(0, 4)); // Get username or create default
-        if (username.trim().isEmpty()) {
-             username = "User_" + newNodeId.substring(0, 4); // Ensure non-empty
-        }
-        newNodeInfo.username = username.trim(); // Store it in NodeInfo
+        String username = data.optString("username", "User_" + newNodeId.substring(0, 4));
+        if (username.trim().isEmpty()) username = "User_" + newNodeId.substring(0, 4);
+        newNodeInfo.username = username.trim();
 
-
-        JSONArray localEndpointsJson = data.optJSONArray("local_endpoints");
-        if (localEndpointsJson == null || localEndpointsJson.length() == 0) {
-            System.out.println("[!] Registration failed: No local_endpoints provided by " + senderAddr);
+        String publicKeyBase64 = data.optString("public_key", null);
+        if (publicKeyBase64 == null || publicKeyBase64.trim().isEmpty()) {
+            System.out.println("[!] Registration failed: Missing 'public_key' from " + senderAddr);
             JSONObject errorResponse = new JSONObject();
             errorResponse.put("status", "error");
-            errorResponse.put("message", "Registration failed: local_endpoints array missing or empty.");
+            errorResponse.put("message", "Registration failed: 'public_key' field is missing or empty.");
             sendResponse(errorResponse, senderAddr);
             return;
         }
+        newNodeInfo.publicKeyBase64 = publicKeyBase64.trim();
 
-        // Add reported local endpoints
+
+        JSONArray localEndpointsJson = data.optJSONArray("local_endpoints");
+        if (localEndpointsJson == null) { // Allow empty array if needed? Check P2PNode logic. Assuming required now.
+             System.out.println("[!] Registration failed: Missing 'local_endpoints' array from " + senderAddr);
+             JSONObject errorResponse = new JSONObject();
+             errorResponse.put("status", "error");
+             errorResponse.put("message", "Registration failed: 'local_endpoints' array is missing.");
+             sendResponse(errorResponse, senderAddr);
+             return;
+        }
+
         int addedCount = 0;
         for (int i = 0; i < localEndpointsJson.length(); i++) {
             JSONObject epJson = localEndpointsJson.optJSONObject(i);
             if (epJson != null) {
                 Endpoint ep = Endpoint.fromJson(epJson);
-                if (ep != null) {
-                    // Avoid adding duplicate local endpoints
-                    if (newNodeInfo.endpoints.stream().noneMatch(existing -> existing.equals(ep))) {
-                         newNodeInfo.endpoints.add(ep);
-                         addedCount++;
-                    }
+                if (ep != null && newNodeInfo.endpoints.stream().noneMatch(existing -> existing.equals(ep))) {
+                    newNodeInfo.endpoints.add(ep);
+                    addedCount++;
                 }
             }
         }
-        if (addedCount == 0) {
-            System.out.println("[!] Registration failed: No *valid* local_endpoints could be parsed from data provided by " + senderAddr);
-            JSONObject errorResponse = new JSONObject();
-            errorResponse.put("status", "error");
-            errorResponse.put("message", "Registration failed: No valid local_endpoints parsed from request.");
-            sendResponse(errorResponse, senderAddr);
-            return;
+        // Allow registration even with 0 local endpoints? Depends on strategy. Assume at least one needed.
+        if (addedCount == 0 && newNodeInfo.endpoints.isEmpty()) { // Check if *any* endpoint exists now (incl. public)
+             // Update public endpoint *before* this check maybe?
+             newNodeInfo.updatePublicEndpoint(senderAddr);
+             if(newNodeInfo.endpoints.isEmpty()){ // Check again after adding public
+                System.out.println("[!] Registration failed: No valid endpoints (local or public) could be determined for " + senderAddr);
+                JSONObject errorResponse = new JSONObject();
+                errorResponse.put("status", "error");
+                errorResponse.put("message", "Registration failed: No valid network endpoints provided or detected.");
+                sendResponse(errorResponse, senderAddr);
+                return;
+             }
+        } else {
+            newNodeInfo.updatePublicEndpoint(senderAddr); // Update public seen either way
         }
 
-        // Add/Update the public endpoint seen by the server
-        newNodeInfo.updatePublicEndpoint(senderAddr);
 
-        // Add to map *after* initial setup
         nodes.put(newNodeId, newNodeInfo);
 
         JSONObject response = new JSONObject();
@@ -252,14 +262,16 @@ public class CoordinationServer {
         }
 
         sendResponse(response, senderAddr);
-        System.out.println("[*] Node registered: " + newNodeInfo.username + " (" + newNodeId + ") (" + nodes.size() + " total)"); // Log username
+        // Removed truncation from log:
+        System.out.println("[*] Node registered: " + newNodeInfo.username + " (" + newNodeId + ") (" + nodes.size() + " total)");
         System.out.println("    Endpoints recorded: " + newNodeInfo.endpoints.stream().map(Endpoint::toString).collect(Collectors.joining(", ")));
+        System.out.println("    Public Key stored: Yes");
         System.out.println("    Source Addr: " + senderAddr);
     }
 
-    // Pass nodeInfo which might already be looked up
     private static void handleKeepAlive(String nodeId, InetSocketAddress senderAddr, NodeInfo nodeInfo) {
-        if (nodeInfo == null) { // Check if nodeInfo was found by the caller
+        if (nodeInfo == null) {
+            // Removed truncation from log:
             System.out.println("[!] Keep-alive from unknown node_id: " + nodeId + " @ " + senderAddr + ". Asking to re-register.");
             JSONObject response = new JSONObject();
             response.put("status", "error");
@@ -267,11 +279,8 @@ public class CoordinationServer {
             sendResponse(response, senderAddr);
             return;
         }
-        // last_seen and public endpoint updated earlier by handlePacket
-        // System.out.println("[*] Keep-alive received from: " + nodeInfo.username + " (" + nodeId + ")"); // Less noisy
     }
 
-    // Pass requesterInfo which might already be looked up
     private static void handleConnectionRequest(JSONObject data, InetSocketAddress senderAddr, NodeInfo requesterInfo) {
         String requesterId = data.optString("node_id", null);
         String targetId = data.optString("target_id", null);
@@ -282,6 +291,7 @@ public class CoordinationServer {
         }
 
         if (requesterInfo == null) {
+            // Removed truncation from log:
             System.out.println("[!] Connection request from unknown node " + requesterId + ". Asking to re-register.");
             JSONObject response = new JSONObject();
             response.put("status", "error");
@@ -289,7 +299,18 @@ public class CoordinationServer {
             sendResponse(response, senderAddr);
             return;
         }
+        if (requesterInfo.publicKeyBase64 == null || requesterInfo.publicKeyBase64.isEmpty()) {
+             // Removed truncation from log:
+             System.out.println("[!] Connection request from node " + requesterInfo.username + " ("+requesterId+") without a stored public key. Asking to re-register.");
+             JSONObject response = new JSONObject();
+             response.put("status", "error");
+             response.put("message", "Missing public key on server. Please re-register.");
+             sendResponse(response, senderAddr);
+             return;
+        }
+
         if (requesterId.equals(targetId)) {
+            // Removed truncation from log:
             System.out.println("[!] Node " + requesterInfo.username + " (" + requesterId + ") tried to connect to itself. Ignoring.");
              JSONObject response = new JSONObject();
              response.put("status", "error");
@@ -298,12 +319,14 @@ public class CoordinationServer {
              return;
         }
 
-        System.out.println("[*] Connection request: " + requesterInfo.username + " (" + requesterId.substring(0,8) + "...) ---> " + targetId.substring(0, Math.min(8, targetId.length())) + "...");
+        // Removed truncation from log:
+        System.out.println("[*] Connection request: " + requesterInfo.username + " (" + requesterId + ") ---> " + targetId);
 
         NodeInfo targetInfo = nodes.get(targetId);
 
         if (targetInfo == null) {
-            System.out.println("[*] Target node " + targetId.substring(0,Math.min(8, targetId.length())) + "... not currently registered or timed out. Storing request from " + requesterInfo.username + "...");
+            // Removed truncation from log:
+            System.out.println("[*] Target node " + targetId + " not currently registered or timed out. Storing request from " + requesterInfo.username + "...");
             pendingConnections.put(requesterId, targetId);
             JSONObject response = new JSONObject();
             response.put("status", "connection_request_received");
@@ -313,19 +336,30 @@ public class CoordinationServer {
             return;
         }
 
-        // Both requester and target are known, store request
-        pendingConnections.put(requesterId, targetId);
+        if (targetInfo.publicKeyBase64 == null || targetInfo.publicKeyBase64.isEmpty()) {
+             // Removed truncation from log:
+             System.out.println("[!] Target node " + targetInfo.username + " (" + targetId + ") does not have a public key stored. Cannot complete connection.");
+             JSONObject response = new JSONObject();
+             response.put("status", "error");
+             response.put("message", "Target node " + targetInfo.username + " is missing a public key on the server. Cannot connect.");
+             sendResponse(response, senderAddr);
+             return;
+        }
 
-        // Check if the target has also requested the requester (match)
+
+        pendingConnections.put(requesterId, targetId);
         String targetWants = pendingConnections.get(targetId);
+
         if (requesterId.equals(targetWants)) {
-            System.out.println("[*] Connection match found: " + requesterInfo.username + " (" + requesterId.substring(0,8) + "...) <===> " + targetInfo.username + " (" + targetId.substring(0,8) + "...)");
+            // Removed truncation from log:
+            System.out.println("[*] Connection match found: " + requesterInfo.username + " (" + requesterId + ") <===> " + targetInfo.username + " (" + targetId + ")");
 
             InetSocketAddress addrA = requesterInfo.lastAddr;
             InetSocketAddress addrB = targetInfo.lastAddr;
 
             if (addrA == null || addrB == null) {
-                 System.err.println("[!!!] Critical Error: Missing last_addr for matched nodes " + requesterId.substring(0,8) + " or " + targetId.substring(0,8) + ". Cannot send info.");
+                 // Removed truncation from log:
+                 System.err.println("[!!!] Critical Error: Missing last_addr for matched nodes " + requesterId + " or " + targetId + ". Cannot send info.");
                  pendingConnections.remove(requesterId);
                  pendingConnections.remove(targetId);
                  return;
@@ -336,7 +370,8 @@ public class CoordinationServer {
             responseA.put("action", "connection_info");
             responseA.put("status", "match_found");
             responseA.put("peer_id", targetId);
-            responseA.put("peer_username", targetInfo.username); // <-- Add target username
+            responseA.put("peer_username", targetInfo.username);
+            responseA.put("peer_public_key", targetInfo.publicKeyBase64);
             JSONArray endpointsB = new JSONArray();
             targetInfo.endpoints.forEach(ep -> endpointsB.put(ep.toJson()));
             responseA.put("peer_endpoints", endpointsB);
@@ -346,27 +381,26 @@ public class CoordinationServer {
             responseB.put("action", "connection_info");
             responseB.put("status", "match_found");
             responseB.put("peer_id", requesterId);
-            responseB.put("peer_username", requesterInfo.username); // <-- Add requester username
+            responseB.put("peer_username", requesterInfo.username);
+            responseB.put("peer_public_key", requesterInfo.publicKeyBase64);
             JSONArray endpointsA = new JSONArray();
             requesterInfo.endpoints.forEach(ep -> endpointsA.put(ep.toJson()));
             responseB.put("peer_endpoints", endpointsA);
 
-            // Send info to both nodes using their last known address
             boolean sentA = sendResponse(responseA, addrA);
-            if(sentA) System.out.println("    -> Sent " + targetInfo.username + "'s info to " + requesterInfo.username + " @ " + addrA);
+            if(sentA) System.out.println("    -> Sent " + targetInfo.username + "'s info (incl. PubKey) to " + requesterInfo.username + " @ " + addrA);
             else System.err.println("[!!!] FAILED to send info to Requester " + requesterInfo.username + " @ " + addrA);
 
             boolean sentB = sendResponse(responseB, addrB);
-            if(sentB) System.out.println("    -> Sent " + requesterInfo.username + "'s info to " + targetInfo.username + " @ " + addrB);
+            if(sentB) System.out.println("    -> Sent " + requesterInfo.username + "'s info (incl. PubKey) to " + targetInfo.username + " @ " + addrB);
             else System.err.println("[!!!] FAILED to send info to Target " + targetInfo.username + " @ " + addrB);
 
 
-            // Clean up pending state for this pair AFTER attempting sends
             pendingConnections.remove(requesterId);
             pendingConnections.remove(targetId);
 
         } else {
-            // Target hasn't requested back yet, just acknowledge requester
+             // Removed truncation from log:
             System.out.println("[*] Stored request from " + requesterInfo.username + " for " + targetInfo.username + ". Waiting for target.");
             JSONObject response = new JSONObject();
             response.put("status", "connection_request_received");
@@ -383,6 +417,10 @@ public class CoordinationServer {
         }
         try {
             byte[] data = jsonObject.toString().getBytes(StandardCharsets.UTF_8);
+            if (data.length > BUFFER_SIZE) {
+                 System.err.println("[!] Cannot send response: Message size (" + data.length + ") exceeds buffer size (" + BUFFER_SIZE + ").");
+                 return false;
+            }
             DatagramPacket packet = new DatagramPacket(data, data.length, destination);
             socket.send(packet);
             return true;
@@ -395,13 +433,11 @@ public class CoordinationServer {
         }
     }
 
-    // Synchronized to prevent race conditions during shutdown
     private static synchronized void shutdown() {
-        if (!running) { return; } // Already shut down
+        if (!running) { return; }
         System.out.println("\n[*] Server shutting down...");
-        running = false; // Signal loops to stop
+        running = false;
 
-        // Stop cleanup task first
         if (cleanupExecutor != null) {
             if (!cleanupExecutor.isShutdown()) {
                 cleanupExecutor.shutdownNow();
@@ -420,14 +456,12 @@ public class CoordinationServer {
             cleanupExecutor = null;
         }
 
-        // Close socket to interrupt blocking receive
         if (socket != null && !socket.isClosed()) {
             socket.close();
             System.out.println("[*] Server socket closed.");
         }
-        socket = null; // Ensure it's nullified
+        socket = null;
 
         System.out.println("[*] Server shutdown sequence complete.");
     }
-
 }
