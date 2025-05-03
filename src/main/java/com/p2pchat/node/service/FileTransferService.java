@@ -6,6 +6,8 @@ import main.java.com.p2pchat.node.model.FileTransferState;
 import main.java.com.p2pchat.node.model.NodeContext;
 import main.java.com.p2pchat.node.model.NodeState;
 import main.java.com.p2pchat.node.network.NetworkManager;
+// Import the callback interface
+import main.java.com.p2pchat.node.ui.GuiCallback;
 
 import org.json.JSONObject;
 
@@ -22,7 +24,8 @@ import java.nio.file.Paths;
 import java.nio.file.StandardOpenOption;
 import java.security.GeneralSecurityException;
 import java.util.Base64;
-import java.util.Map;
+// Import Map for logging helper if needed, though logging moved
+// import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -33,6 +36,7 @@ public class FileTransferService {
     private final NodeContext context;
     private final NetworkManager networkManager;
     private final ScheduledExecutorService timeoutExecutor;
+    private GuiCallback guiCallback = null; // <<< Added callback reference
 
     public FileTransferService(NodeContext context, NetworkManager networkManager) {
         this.context = context;
@@ -44,8 +48,16 @@ public class FileTransferService {
         });
     }
 
+    // <<< Added setter for callback >>>
+    public void setGuiCallback(GuiCallback callback) {
+        this.guiCallback = callback;
+    }
+
     public void start() {
-        // Schedule the task to check for timeouts periodically
+         if (timeoutExecutor.isShutdown()) {
+              System.err.println("[!] FileTransferService executor already shut down. Cannot start.");
+              return;
+         }
         timeoutExecutor.scheduleAtFixedRate(this::checkTimeouts,
                 NodeConfig.FILE_ACK_TIMEOUT_MS, // Initial delay
                 NodeConfig.FILE_ACK_TIMEOUT_MS / 2, // Check frequently
@@ -65,41 +77,48 @@ public class FileTransferService {
                 Thread.currentThread().interrupt();
             }
         }
-        // Cancel any remaining active transfers - Handled by P2PNode.shutdown calling context cleanup
     }
 
-    // Called by UI to initiate sending a file
+    // Called by GUI to initiate sending a file
     public void initiateTransfer(String filePathStr) {
+        String userMsgPrefix = "System: "; // For GUI messages
         if (context.currentState.get() != NodeState.CONNECTED_SECURE) {
-            System.out.println("\n[!] You must be connected to a peer to send a file.");
-            context.redrawPrompt.set(true);
+            String msg = "[!] You must be connected to a peer to send a file.";
+            System.out.println("\n" + msg);
+            if (guiCallback != null) guiCallback.appendMessage(userMsgPrefix + msg);
             return;
         }
         String peerId = context.connectedPeerId.get();
         InetSocketAddress peerAddr = context.peerAddrConfirmed.get();
+        String peerDisplay = context.getPeerDisplayName();
+
         if (peerId == null || peerAddr == null) {
-            System.out.println("\n[!] Connection state invalid, cannot send file.");
-            context.redrawPrompt.set(true);
+            String msg = "[!] Connection state invalid, cannot send file.";
+            System.out.println("\n" + msg);
+            if (guiCallback != null) guiCallback.appendMessage(userMsgPrefix + msg);
             return;
         }
 
         try {
             Path filePath = Paths.get(filePathStr);
             if (!Files.exists(filePath) || !Files.isReadable(filePath) || Files.isDirectory(filePath)) {
-                System.out.println("\n[!] File not found or cannot be read: " + filePathStr);
-                context.redrawPrompt.set(true);
+                String msg = "[!] File not found or cannot be read: " + filePathStr;
+                System.out.println("\n" + msg);
+                if (guiCallback != null) guiCallback.appendMessage(userMsgPrefix + msg);
                 return;
             }
 
             long fileSize = Files.size(filePath);
             if (fileSize == 0) {
-                 System.out.println("\n[!] Cannot send empty file.");
-                 context.redrawPrompt.set(true);
+                 String msg = "[!] Cannot send empty file.";
+                 System.out.println("\n" + msg);
+                 if (guiCallback != null) guiCallback.appendMessage(userMsgPrefix + msg);
                  return;
             }
             if (fileSize > NodeConfig.MAX_FILE_SIZE_BYTES) {
-                System.out.println("\n[!] File exceeds size limit (" + (NodeConfig.MAX_FILE_SIZE_BYTES / (1024.0 * 1024.0)) + " MiB): " + filePath.getFileName());
-                context.redrawPrompt.set(true);
+                String msg = "[!] File exceeds size limit (" + String.format("%.2f MiB", NodeConfig.MAX_FILE_SIZE_BYTES / (1024.0 * 1024.0)) + "): " + filePath.getFileName();
+                System.out.println("\n" + msg);
+                if (guiCallback != null) guiCallback.appendMessage(userMsgPrefix + msg);
                 return;
             }
 
@@ -109,9 +128,12 @@ public class FileTransferService {
             FileTransferState state = new FileTransferState(transferId, filename, fileSize, peerId, true);
             state.sourcePath = filePath;
             state.status = FileTransferState.Status.OFFER_SENT; // Mark as offer sent initially
-
-            // Store state before sending offer
             context.ongoingTransfers.put(transferId, state);
+
+            // <<< Notify GUI: Transfer initiated >>>
+            if (guiCallback != null) {
+                guiCallback.updateTransferProgress(transferId, filename, 0, fileSize, true, state.status);
+            }
 
             JSONObject offerMsg = new JSONObject();
             offerMsg.put("action", "file_offer");
@@ -120,30 +142,35 @@ public class FileTransferService {
             offerMsg.put("filename", filename);
             offerMsg.put("filesize", fileSize);
 
-            System.out.println("\n[*] Sending file offer to " + context.getPeerDisplayName() + " for '" + filename + "' (" + fileSize + " bytes) [ID: " + transferId + "]");
+            String offerLogMsg = String.format("Sending file offer to %s for '%s' (%.2f KB) [ID: %s]",
+                                            peerDisplay, filename, fileSize / 1024.0, transferId.substring(0,8));
+            System.out.println("\n[*] " + offerLogMsg);
+            // Don't use appendMessage for this, let GUI handle offer state via progress update
+
             boolean sent = networkManager.sendUdp(offerMsg, peerAddr);
 
             if (!sent) {
-                System.out.println("[!] Failed to send file offer.");
-                state.status = FileTransferState.Status.FAILED;
-                // ---> ADD LOGGING FOR OFFER FAIL <---
-                logTransferEvent(state, "SENT", "[File Transfer] FAILED sending offer for '" + filename + "'");
-                // ---> END LOGGING <---
-                context.ongoingTransfers.remove(transferId); // Clean up immediately if offer fails
+                String failMsg = "[!] Failed to send file offer for '" + filename + "'.";
+                System.err.println(failMsg);
+                // Use failTransfer to handle cleanup and GUI notification
+                failTransfer(state, "Failed to send offer");
             } else {
                  state.status = FileTransferState.Status.AWAITING_ACCEPT; // Update status after successful send
-                 // ---> ADD LOGGING <---
                  logTransferEvent(state, "SENT", "[File Transfer] Offered file '" + filename + "' (" + fileSize + " bytes)");
-                 // ---> END LOGGING <---
+                 // <<< Notify GUI: Status changed >>>
+                 if (guiCallback != null) {
+                     guiCallback.updateTransferProgress(transferId, filename, 0, fileSize, true, state.status);
+                 }
             }
-            context.redrawPrompt.set(true);
 
         } catch (IOException e) {
-            System.err.println("\n[!] Error accessing file: " + e.getMessage());
-            context.redrawPrompt.set(true);
+            String msg = "[!] Error accessing file: " + e.getMessage();
+            System.err.println("\n" + msg);
+            if (guiCallback != null) guiCallback.appendMessage(userMsgPrefix + msg);
         } catch (Exception e) {
-            System.err.println("\n[!] Unexpected error initiating transfer: " + e.getMessage());
-            context.redrawPrompt.set(true);
+            String msg = "[!] Unexpected error initiating transfer: " + e.getMessage();
+            System.err.println("\n" + msg);
+            if (guiCallback != null) guiCallback.appendMessage(userMsgPrefix + msg);
             e.printStackTrace();
         }
     }
@@ -154,84 +181,97 @@ public class FileTransferService {
         String filename = data.optString("filename", null);
         long filesize = data.optLong("filesize", -1);
         String senderId = data.optString("node_id", null);
+        String senderDisplay = context.getPeerDisplayName(); // Assumes offer is from connected peer
 
-        String connectedPeerId = context.connectedPeerId.get();
-        InetSocketAddress confirmedAddr = context.peerAddrConfirmed.get();
-
-        // Basic validation
+        // --- Basic Validation ---
         if (transferId == null || filename == null || filesize <= 0 || senderId == null) {
             System.err.println("\n[!] Received invalid file offer (missing fields).");
-            context.redrawPrompt.set(true);
+            // No GUI action needed, just log error
             return;
         }
         // Ensure offer is from the currently connected peer
-        if (!senderId.equals(connectedPeerId) || !peerAddr.equals(confirmedAddr)) {
+        if (!senderId.equals(context.connectedPeerId.get()) || !peerAddr.equals(context.peerAddrConfirmed.get())) {
             System.err.println("\n[!] Received file offer from unexpected peer/address. Ignoring.");
-            context.redrawPrompt.set(true);
             return;
         }
-         // Check if transfer ID already exists (shouldn't happen often)
+         // Check if transfer ID already exists
          if (context.ongoingTransfers.containsKey(transferId)) {
               System.err.println("\n[!] Received duplicate file offer ID: " + transferId + ". Ignoring.");
-              context.redrawPrompt.set(true);
               return;
          }
+         // Check size limit
          if (filesize > NodeConfig.MAX_FILE_SIZE_BYTES) {
-             System.out.println("\n[!] Received file offer for '" + filename + "' but it exceeds size limit (" + String.format("%.2f", filesize / (1024*1024.0)) + " MiB). Auto-rejecting.");
-             // Don't create state, just send reject back directly? Need transferId though.
-             // Create minimal state just to reject properly.
+             String sizeMsg = String.format("Auto-rejecting file offer '%s' from %s - exceeds size limit (%.2f MiB).",
+                                            filename, senderDisplay, filesize / (1024.0*1024.0));
+             System.out.println("\n[!] " + sizeMsg);
+             // Send reject without creating persistent state
              FileTransferState tempState = new FileTransferState(transferId, filename, filesize, senderId, false);
-             respondToOffer(transferId, false, "File size limit exceeded", tempState); // Auto-reject using temp state
-             context.redrawPrompt.set(true);
+             respondToOfferInternal(transferId, false, "File size limit exceeded", tempState, false); // Auto-reject
+             // <<< Notify GUI (Optional) >>>
+             if (guiCallback != null) guiCallback.appendMessage("System: " + sizeMsg);
              return;
          }
+        // --- End Validation ---
 
 
+        // Offer seems valid, create state
         FileTransferState state = new FileTransferState(transferId, filename, filesize, senderId, false);
         state.status = FileTransferState.Status.OFFER_RECEIVED;
         context.ongoingTransfers.put(transferId, state);
 
-        // Notify UI (This part needs CommandLineInterface to handle it)
-        System.out.println("\n-----------------------------------------------------");
-        System.out.println("[*] Incoming file offer from " + context.getPeerDisplayName() + ":");
-        System.out.println("    File: '" + filename + "'");
-        System.out.println("    Size: " + filesize + " bytes");
-        System.out.println("    Transfer ID: " + transferId);
-        System.out.println("    To accept, type: accept " + transferId);
-        System.out.println("    To reject, type: reject " + transferId);
-        System.out.println("-----------------------------------------------------");
-        context.redrawPrompt.set(true); // Signal UI to redraw prompt
+        // <<< Notify GUI to show the offer dialog >>>
+        if (guiCallback != null) {
+            guiCallback.showFileOffer(transferId, filename, filesize, senderDisplay);
+        } else { // Fallback to console if no GUI
+            System.out.println("\n-----------------------------------------------------");
+            System.out.println("[*] Incoming file offer from " + senderDisplay + ":");
+            System.out.println("    File: '" + filename + "'");
+            System.out.println("    Size: " + filesize + " bytes");
+            System.out.println("    Transfer ID: " + transferId);
+            System.out.println("    To accept, type: accept " + transferId);
+            System.out.println("    To reject, type: reject " + transferId);
+            System.out.println("-----------------------------------------------------");
+        }
     }
 
-     // Called by UI when user types 'accept' or 'reject'
+     // Called by GUI when user clicks 'accept' or 'reject'
      public void respondToOffer(String transferId, boolean accepted) {
          FileTransferState state = context.ongoingTransfers.get(transferId);
          if (state == null) {
-             System.out.println("\n[!] No pending file offer found with ID: " + transferId);
-             context.redrawPrompt.set(true);
+             String msg = "[!] No pending file offer found with ID: " + transferId.substring(0,8) + "...";
+             System.out.println("\n" + msg);
+             if (guiCallback != null) guiCallback.appendMessage("System: " + msg);
              return;
          }
-         respondToOffer(transferId, accepted, null, state); // Overload without reason
+         // Use internal helper, triggered by user action
+         respondToOfferInternal(transferId, accepted, null, state, true);
      }
 
-    // Internal method with optional reason and provided state
-    private void respondToOffer(String transferId, boolean accepted, String reason, FileTransferState state) {
+    // Internal method with optional reason, state, and source (user/auto)
+    private void respondToOfferInternal(String transferId, boolean accepted, String reason, FileTransferState state, boolean userAction) {
+        String userMsgPrefix = userAction ? "System: " : "System (Auto): "; // Distinguish user vs auto actions
+
+        // Validate state
         if (state.isSender || state.status != FileTransferState.Status.OFFER_RECEIVED) {
-            // Should not happen if called correctly, but check anyway
-            if (state.status != FileTransferState.Status.FAILED) { // Avoid duplicate msg if already failed
-                System.out.println("\n[!] Cannot respond to offer " + transferId + " (Invalid state: " + state.status + ")");
-                context.redrawPrompt.set(true);
+            if (state.status != FileTransferState.Status.FAILED && state.status != FileTransferState.Status.REJECTED) { // Avoid duplicate msg
+                String msg = "[!] Cannot respond to offer " + transferId.substring(0,8) + " (Invalid state: " + state.status + ")";
+                System.out.println("\n" + msg);
+                // if (guiCallback != null) guiCallback.appendMessage(userMsgPrefix + msg); // Maybe too noisy
             }
             return;
         }
 
         String peerId = state.peerNodeId;
         InetSocketAddress peerAddr = context.peerAddrConfirmed.get();
-        // Double check peer connection state hasn't changed
+        String peerDisplay = context.getPeerDisplayName();
+
+        // Double check peer connection state
         if (!peerId.equals(context.connectedPeerId.get()) || peerAddr == null) {
-             System.out.println("\n[!] Peer connection lost or changed, cannot respond to offer " + transferId);
-             failTransfer(state, "Connection lost before response"); // Use failTransfer to handle cleanup/logging
-             return;
+            String msg = "[!] Peer connection lost or changed, cannot respond to offer " + transferId.substring(0,8);
+            System.out.println("\n" + msg);
+            failTransfer(state, "Connection lost before response"); // Handles cleanup and GUI notification
+             // No need for separate GUI message here, failTransfer covers it
+            return;
         }
 
         JSONObject responseMsg = new JSONObject();
@@ -241,45 +281,63 @@ public class FileTransferService {
         if (accepted) {
             responseMsg.put("action", "file_accept");
             state.status = FileTransferState.Status.TRANSFERRING_RECV; // Prepare to receive
+
+            // <<< Notify GUI: Status changed >>>
+            if (guiCallback != null) {
+                guiCallback.updateTransferProgress(transferId, state.filename, state.transferredBytes.get(), state.filesize, false, state.status);
+            }
+
             // Prepare file path and output stream
             if (!prepareDownloadFile(state)) {
-                 // failTransfer will log and clean up
-                 failTransfer(state, "Failed to create local file");
-                 // Send reject instead
-                 respondToOffer(transferId, false, "Failed to create local file", state); // Resend as reject
-                 return;
+                failTransfer(state, "Failed to create local file");
+                // Send reject instead
+                respondToOfferInternal(transferId, false, "Failed to create local file", state, false); // Resend as auto-reject
+                return;
             }
-            System.out.println("\n[*] Accepting file transfer '" + state.filename + "' [ID: " + transferId + "]. Receiving...");
-            // ---> ADD LOGGING <---
+
+            String acceptMsg = String.format("Accepting file transfer '%s' from %s [ID: %s]. Receiving...",
+                                            state.filename, peerDisplay, transferId.substring(0,8));
+            System.out.println("\n[*] " + acceptMsg);
+            // <<< Notify GUI >>> (appendMessage might be redundant if progress shows 'Receiving')
+            // if (guiCallback != null) guiCallback.appendMessage(userMsgPrefix + acceptMsg);
             logTransferEvent(state, "RECEIVED", "[File Transfer] Accepted file '" + state.filename + "'");
-            // ---> END LOGGING <---
-        } else {
+
+        } else { // Rejected
             responseMsg.put("action", "file_reject");
             if (reason != null && !reason.isEmpty()) {
                  responseMsg.put("reason", reason);
             }
             state.status = FileTransferState.Status.REJECTED; // Mark as rejected locally
-            System.out.println("\n[*] Rejecting file transfer '" + state.filename + "' [ID: " + transferId + "].");
-            // ---> ADD LOGGING <---
+
+            String rejectMsg = String.format("Rejecting file transfer '%s' from %s [ID: %s].",
+                                            state.filename, peerDisplay, transferId.substring(0,8));
+            System.out.println("\n[*] " + rejectMsg);
+
             logTransferEvent(state, "RECEIVED", "[File Transfer] Rejected file '" + state.filename + "'" + (reason != null ? ". Reason: " + reason : ""));
-            // ---> END LOGGING <---
+
+            // <<< Notify GUI: Transfer finished (rejected) >>>
+             if (guiCallback != null) {
+                 guiCallback.transferFinished(transferId, "Rejected" + (reason != null ? ": " + reason : ""));
+             }
+
             // Clean up receiver state immediately on rejection
             state.closeStreams();
-            context.ongoingTransfers.remove(transferId);
+            context.ongoingTransfers.remove(transferId); // Remove here, not in failTransfer
         }
 
+        // Send the response (Accept or Reject)
         boolean sent = networkManager.sendUdp(responseMsg, peerAddr);
         if (!sent) {
-             System.out.println("[!] Failed to send response for transfer " + transferId);
-             // If sending fails, revert state and clean up
-             // Check if we were accepting, if so, need to fail it properly
+             String sendFailMsg = "[!] Failed to send " + (accepted ? "accept" : "reject") + " response for transfer " + transferId.substring(0,8);
+             System.err.println(sendFailMsg);
+             // If sending ACCEPT fails, fail the transfer properly
              if (accepted && state.status != FileTransferState.Status.FAILED) {
                  failTransfer(state, "Failed to send accept response");
-             } else {
-                 // If rejecting and send fails, it was already removed/logged, do nothing more
+             } else if (!accepted) {
+                 // If sending REJECT fails, we already cleaned up locally, just log error
+                 if (guiCallback != null) guiCallback.appendMessage("System: Error - " + sendFailMsg);
              }
         }
-        context.redrawPrompt.set(true);
     }
 
      // Helper to create downloads dir and prepare output stream
@@ -291,14 +349,13 @@ public class FileTransferService {
                    System.out.println("[*] Created downloads directory: " + downloadDir.toAbsolutePath());
                }
 
-               // Sanitize filename slightly (basic example, could be more robust)
                String sanitizedFilename = state.filename.replaceAll("[^a-zA-Z0-9._-]", "_");
                if (sanitizedFilename.isEmpty() || sanitizedFilename.equals(".") || sanitizedFilename.equals("..")) {
-                    sanitizedFilename = "downloaded_file"; // Fallback for invalid names
+                    sanitizedFilename = "downloaded_file_" + UUID.randomUUID().toString().substring(0, 4); // Fallback
                }
                Path filePath = downloadDir.resolve(sanitizedFilename);
 
-               // Handle potential name collisions simply by appending a number
+               // Handle name collisions
                int count = 0;
                String baseName = sanitizedFilename;
                String extension = "";
@@ -306,7 +363,7 @@ public class FileTransferService {
                if (dotIndex > 0 && dotIndex < sanitizedFilename.length() - 1) {
                    baseName = sanitizedFilename.substring(0, dotIndex);
                    extension = sanitizedFilename.substring(dotIndex);
-               } else if (dotIndex == 0) { // Handle filenames starting with "."
+               } else if (dotIndex == 0) {
                    extension = sanitizedFilename;
                    baseName = "file";
                }
@@ -314,25 +371,19 @@ public class FileTransferService {
                while(Files.exists(filePath)) {
                     count++;
                     filePath = downloadDir.resolve(baseName + "_" + count + extension);
-                    if (count > 999) { // Safety break
-                         System.err.println("[!] Too many file collisions for: " + sanitizedFilename);
-                         return false;
-                    }
+                    if (count > 999) { throw new IOException("Too many file collisions for: " + sanitizedFilename); }
                }
 
                state.downloadPath = filePath;
-               // Open stream using CREATE_NEW to prevent overwriting concurrently created files
                state.outputStream = new BufferedOutputStream(Files.newOutputStream(filePath, StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE));
                System.out.println("[*] Receiving file to: " + filePath.toAbsolutePath());
                return true;
-          } catch (IOException e) {
-               System.err.println("\n[!] Error preparing download file '" + state.filename + "': " + e.getMessage());
-               context.redrawPrompt.set(true);
+
+          } catch (IOException | SecurityException | UnsupportedOperationException e) {
+               String errorMsg = "[!] Error preparing download file '" + state.filename + "': " + e.getMessage();
+               System.err.println("\n" + errorMsg);
+               if (guiCallback != null) guiCallback.appendMessage("System: Error - " + errorMsg);
                return false;
-          } catch (Exception e) { // Catch other potential errors like security exceptions
-                System.err.println("\n[!] Unexpected error preparing download file '" + state.filename + "': " + e.getMessage());
-                context.redrawPrompt.set(true);
-                return false;
           }
      }
 
@@ -342,31 +393,31 @@ public class FileTransferService {
         String transferId = data.optString("transfer_id", null);
         String receiverId = data.optString("node_id", null);
         FileTransferState state = context.ongoingTransfers.get(transferId);
+        String peerDisplay = context.getPeerDisplayName();
 
-        if (state == null || !state.isSender || state.status != FileTransferState.Status.AWAITING_ACCEPT) {
-            // Ignore unexpected accept message
-            return;
-        }
-        // Verify it's from the correct peer
-        if (!state.peerNodeId.equals(receiverId)) {
-             return;
-        }
+        // Validate state and sender
+        if (state == null || !state.isSender || state.status != FileTransferState.Status.AWAITING_ACCEPT) return;
+        if (!state.peerNodeId.equals(receiverId)) return;
 
-        System.out.println("\n[*] Peer accepted file transfer '" + state.filename + "' [ID: " + transferId + "]. Starting send...");
+        String acceptMsg = String.format("Peer %s accepted file transfer '%s' [ID: %s]. Starting send...",
+                                        peerDisplay, state.filename, transferId.substring(0,8));
+        System.out.println("\n[*] " + acceptMsg);
         state.status = FileTransferState.Status.TRANSFERRING_SEND;
-        context.redrawPrompt.set(true);
-        // ---> ADD LOGGING <---
+        // <<< Notify GUI >>>
+        if (guiCallback != null) {
+             // guiCallback.appendMessage("System: " + acceptMsg); // Maybe redundant
+             guiCallback.updateTransferProgress(transferId, state.filename, state.transferredBytes.get(), state.filesize, true, state.status);
+        }
         logTransferEvent(state, "SENT", "[File Transfer] Peer accepted file '" + state.filename + "'");
-        // ---> END LOGGING <---
 
         // Open input stream
         try {
-             // Ensure previous stream is closed if somehow open (shouldn't be)
-             state.closeStreams();
+             state.closeStreams(); // Ensure closed first
              state.inputStream = new BufferedInputStream(Files.newInputStream(state.sourcePath));
         } catch (IOException e) {
-             System.err.println("[!] Failed to open file for reading: " + state.sourcePath + " - " + e.getMessage());
-             failTransfer(state, "Failed to open file");
+             String errorMsg = "[!] Failed to open file for reading: " + state.sourcePath + " - " + e.getMessage();
+             System.err.println(errorMsg);
+             failTransfer(state, "Failed to open file"); // Handles GUI update
              return;
         }
 
@@ -380,22 +431,19 @@ public class FileTransferService {
         String reason = data.optString("reason", "No reason given");
         String receiverId = data.optString("node_id", null);
         FileTransferState state = context.ongoingTransfers.get(transferId);
+        String peerDisplay = context.getPeerDisplayName();
 
-        if (state == null || !state.isSender || state.isTerminated()) {
-            // Ignore if transfer doesn't exist or already finished/failed/cancelled
-            return;
-        }
-         // Verify it's from the correct peer
-        if (!state.peerNodeId.equals(receiverId)) {
-             return;
-        }
+        // Validate state and sender
+        if (state == null || !state.isSender || state.isTerminated()) return;
+        if (!state.peerNodeId.equals(receiverId)) return;
 
-        System.out.println("\n[!] Peer rejected file transfer '" + state.filename + "' [ID: " + transferId + "]. Reason: " + reason);
-        // ---> ADD LOGGING <---
-        // Log before failing, as failTransfer removes the state
+        String rejectMsg = String.format("Peer %s rejected file transfer '%s' [ID: %s]. Reason: %s",
+                                        peerDisplay, state.filename, transferId.substring(0,8), reason);
+        System.out.println("\n[!] " + rejectMsg);
+
         logTransferEvent(state, "SENT", "[File Transfer] Peer rejected file '" + state.filename + "'. Reason: " + reason);
-        // ---> END LOGGING <---
-        failTransfer(state, "Peer rejected: " + reason); // Use failTransfer for cleanup
+        // Use failTransfer for cleanup and GUI notification
+        failTransfer(state, "Peer rejected: " + reason);
     }
 
     // Called by PeerMessageHandler when a file_data chunk is received
@@ -403,52 +451,48 @@ public class FileTransferService {
         String transferId = data.optString("transfer_id", null);
         FileTransferState state = context.ongoingTransfers.get(transferId);
 
-        if (state == null || state.isSender || state.status != FileTransferState.Status.TRANSFERRING_RECV) {
-             // Ignore if transfer not found, we are sender, or not expecting data
-            return;
-        }
+        // Validate state
+        if (state == null || state.isSender || state.status != FileTransferState.Status.TRANSFERRING_RECV) return;
 
         int seqNum = data.optInt("seq_num", -1);
         String ivBase64 = data.optString("iv", null);
         String encryptedPayloadBase64 = data.optString("e_payload", null);
         boolean isLast = data.optBoolean("is_last", false);
+        String senderId = data.optString("node_id", null);
 
-        // Validate received data
+        // Validate packet data and sender
         if (seqNum < 0 || ivBase64 == null || encryptedPayloadBase64 == null) {
-            System.err.println("[!] Received invalid file_data packet for transfer " + transferId + " (missing fields).");
-            return;
+            System.err.println("[!] Received invalid file_data packet for transfer " + transferId.substring(0,8) + " (missing fields)."); return;
         }
-        // Verify sender node ID matches peer
-         String senderId = data.optString("node_id", null);
-         if(!state.peerNodeId.equals(senderId)) {
-              System.err.println("[!] Received file_data packet from unexpected sender for transfer " + transferId);
-              return;
-         }
-         if (state.outputStream == null) {
-              System.err.println("[!] Output stream is null, cannot write received data for transfer " + transferId);
-              failTransfer(state, "Output stream missing");
-              return;
-         }
+        if (!state.peerNodeId.equals(senderId)) {
+             System.err.println("[!] Received file_data packet from unexpected sender for transfer " + transferId.substring(0,8)); return;
+        }
+        if (state.outputStream == null) {
+             failTransfer(state, "Output stream missing"); return;
+        }
 
-
-        // Check sequence number
+        // Process based on sequence number
         if (seqNum == state.expectedSeqNum.get()) {
             // Expected chunk
             SecretKey sharedKey = context.peerSymmetricKeys.get(state.peerNodeId);
-            if (sharedKey == null) {
-                System.err.println("[!] CRITICAL: No shared key found for peer " + state.peerNodeId + ". Cannot decrypt file data.");
-                failTransfer(state, "Missing decryption key");
-                return;
-            }
+            if (sharedKey == null) { failTransfer(state, "Missing decryption key"); return; }
 
             try {
                 CryptoUtils.EncryptedPayload encryptedPayload = new CryptoUtils.EncryptedPayload(ivBase64, encryptedPayloadBase64);
-                String decryptedChunkStr = CryptoUtils.decrypt(encryptedPayload, sharedKey); // Assuming decrypt returns String
-                byte[] decryptedChunk = Base64.getDecoder().decode(decryptedChunkStr); // Decode base64 chunk
+                String decryptedChunkStr = CryptoUtils.decrypt(encryptedPayload, sharedKey);
+                byte[] decryptedChunk = Base64.getDecoder().decode(decryptedChunkStr);
 
                 // Write to file
                 state.outputStream.write(decryptedChunk);
                 state.transferredBytes.addAndGet(decryptedChunk.length);
+
+                // <<< Notify GUI: Progress update >>>
+                if (guiCallback != null) {
+                     // Update progress frequently or based on seqNum modulo
+                     if (seqNum % 10 == 0 || isLast) { // Update every 10 chunks or on last
+                         guiCallback.updateTransferProgress(transferId, state.filename, state.transferredBytes.get(), state.filesize, false, state.status);
+                     }
+                }
 
                 // Send ACK
                 sendAck(state, seqNum);
@@ -456,55 +500,42 @@ public class FileTransferService {
                 // Increment expected sequence number
                 state.expectedSeqNum.incrementAndGet();
 
-                // Optional: Print progress more frequently
-                if (seqNum % 50 == 0 && seqNum > 0) { // Print every 50 chunks
-                     double percent = (state.filesize > 0) ? (100.0 * state.transferredBytes.get() / state.filesize) : 0.0;
-                     System.out.printf("[FileTransfer:%s] Receiving... %.1f%%%n", transferId.substring(0,4), percent);
-                     context.redrawPrompt.set(true);
-                }
-
                 // Handle completion
                 if (isLast) {
-                     state.outputStream.flush(); // Ensure all data is written
-                     state.closeStreams(); // Close the file stream
+                     state.outputStream.flush();
+                     state.closeStreams();
                      state.status = FileTransferState.Status.COMPLETED;
-                     System.out.println("\n[*] File transfer COMPLETED: '" + state.filename + "' [ID: " + transferId + "] received successfully.");
+                     String completeMsg = String.format("File transfer COMPLETED: '%s' [ID: %s] received successfully.", state.filename, transferId.substring(0,8));
+                     System.out.println("\n[*] " + completeMsg);
                      System.out.println("    Saved to: " + state.downloadPath);
-                     // ---> ADD LOGGING <---
+
                      logTransferEvent(state, "RECEIVED", "[File Transfer] Completed receiving '" + state.filename + "'");
-                     // ---> END LOGGING <---
+                     // <<< Notify GUI: Transfer finished >>>
+                     if (guiCallback != null) {
+                         guiCallback.transferFinished(transferId, "Completed");
+                     }
                      context.ongoingTransfers.remove(transferId); // Remove completed transfer state
-                     context.redrawPrompt.set(true);
                 }
 
-            } catch (GeneralSecurityException e) {
-                System.err.println("\n[!] Decryption failed for chunk " + seqNum + " of transfer " + transferId + ": " + e.getMessage());
-                failTransfer(state, "Decryption failed");
-            } catch (IOException e) {
-                System.err.println("\n[!] Error writing file chunk " + seqNum + " for transfer " + transferId + ": " + e.getMessage());
-                failTransfer(state, "File write error");
-            } catch (IllegalArgumentException e) {
-                 System.err.println("\n[!] Error decoding Base64 file chunk " + seqNum + " for transfer " + transferId + ": " + e.getMessage());
-                 failTransfer(state, "Data decoding error");
-            }
+            } catch (GeneralSecurityException e) { failTransfer(state, "Decryption failed (chunk " + seqNum + ")");
+            } catch (IOException e) { failTransfer(state, "File write error (chunk " + seqNum + ")");
+            } catch (IllegalArgumentException e) { failTransfer(state, "Data decoding error (chunk " + seqNum + ")"); }
 
         } else if (seqNum < state.expectedSeqNum.get()) {
-            // Duplicate chunk, resend ACK for that chunk
-             // System.out.println("[?] Received duplicate chunk " + seqNum + " for transfer " + transferId + ". Resending ACK.");
+             // Duplicate chunk, resend ACK for that chunk
              sendAck(state, seqNum);
         } else {
-            // Unexpected future chunk, ignore for now in stop-and-wait
-            // System.out.println("[?] Received out-of-order chunk " + seqNum + " (expected " + state.expectedSeqNum.get() + ") for transfer " + transferId + ". Ignoring.");
+            // Future chunk, ignore in stop-and-wait
         }
     }
 
     // Send acknowledgment for a received chunk
     private void sendAck(FileTransferState receiverState, int ackSeqNum) {
         InetSocketAddress peerAddr = context.peerAddrConfirmed.get();
+        // Basic check if we can send
         if (peerAddr == null || !receiverState.peerNodeId.equals(context.connectedPeerId.get())) {
-             // Connection lost or changed peer
-             if (!receiverState.isTerminated()) { // Avoid failing already completed/failed transfers
-                 failTransfer(receiverState, "Connection lost before sending ACK");
+             if (!receiverState.isTerminated()) {
+                 failTransfer(receiverState, "Connection lost before sending ACK " + ackSeqNum);
              }
              return;
         }
@@ -515,7 +546,7 @@ public class FileTransferService {
         ackMsg.put("transfer_id", receiverState.transferId);
         ackMsg.put("ack_seq_num", ackSeqNum);
 
-        networkManager.sendUdp(ackMsg, peerAddr); // Send ACK (fire and forget for ACK itself)
+        networkManager.sendUdp(ackMsg, peerAddr); // Fire and forget for ACK
     }
 
 
@@ -524,126 +555,99 @@ public class FileTransferService {
         String transferId = data.optString("transfer_id", null);
         int ackSeqNum = data.optInt("ack_seq_num", -1);
         String ackingPeerId = data.optString("node_id", null);
-
         FileTransferState state = context.ongoingTransfers.get(transferId);
 
-        if (state == null || !state.isSender || state.status != FileTransferState.Status.TRANSFERRING_SEND) {
-            // Ignore if not sending this transfer
-            return;
-        }
-         // Verify ACK is from the correct peer
-         if (!state.peerNodeId.equals(ackingPeerId)) {
-              return;
-         }
+        // Validate state and sender
+        if (state == null || !state.isSender || state.status != FileTransferState.Status.TRANSFERRING_SEND) return;
+        if (!state.peerNodeId.equals(ackingPeerId)) return;
 
-
-        // Check if this ACK is for the chunk we are waiting for
+        // Process ACK if it's the one we're waiting for
         if (ackSeqNum == state.currentSeqNum.get()) {
-             // Correct ACK received
              state.lastAckReceivedSeqNum.set(ackSeqNum);
-             state.retryCount.set(0); // Reset retry count on successful ACK
+             state.retryCount.set(0); // Reset retry count
              state.currentSeqNum.incrementAndGet(); // Move to next sequence number
 
-             // Check if transfer is complete (using transferred bytes vs filesize)
-             // We check this *before* sending the next chunk
-             if (state.transferredBytes.get() >= state.filesize) {
+             // Check if transfer is complete (all bytes ACKed)
+             // Note: state.transferredBytes reflects bytes *sent*, not necessarily ACKed here.
+             // We rely on the final ACK for the last chunk to signal completion.
+             // If the last chunk was ACKed (ackSeqNum corresponds to the last seqNum sent), then complete.
+             long totalChunks = (long) Math.ceil((double) state.filesize / NodeConfig.FILE_CHUNK_SIZE);
+             boolean isLastAck = (ackSeqNum == totalChunks - 1); // Check if this was the ACK for the last chunk
+
+             if (isLastAck) {
                   state.status = FileTransferState.Status.COMPLETED;
                   state.closeStreams();
-                  System.out.println("\n[*] File transfer COMPLETED: '" + state.filename + "' [ID: " + transferId + "] sent successfully.");
-                  // ---> ADD LOGGING <---
+                  String completeMsg = String.format("File transfer COMPLETED: '%s' [ID: %s] sent successfully.", state.filename, transferId.substring(0,8));
+                  System.out.println("\n[*] " + completeMsg);
+
                   logTransferEvent(state, "SENT", "[File Transfer] Completed sending '" + state.filename + "'");
-                  // ---> END LOGGING <---
+                  // <<< Notify GUI: Transfer finished >>>
+                  if (guiCallback != null) {
+                      guiCallback.transferFinished(transferId, "Completed");
+                  }
                   context.ongoingTransfers.remove(transferId); // Remove completed transfer state
-                  context.redrawPrompt.set(true);
              } else {
                   // Send the next chunk
                   sendNextChunk(state);
              }
-        } else if (ackSeqNum > state.currentSeqNum.get()) {
-             // Received ACK for a future packet? Might happen with reordering/loss.
-             // Simple stop-and-wait ignores this for now. Could potentially fast-forward.
-             // System.out.println("[?] Received unexpected future ACK " + ackSeqNum + " (Current: " + state.currentSeqNum.get() + ")");
-        } else {
-             // Duplicate or old ACK, ignore
-             // System.out.println("[?] Received duplicate/old ACK " + ackSeqNum + " for transfer " + transferId);
         }
+        // Ignore duplicate or old ACKs
     }
 
     // Sends the next chunk of the file for the given transfer state
     private void sendNextChunk(FileTransferState senderState) {
-         if (senderState.status != FileTransferState.Status.TRANSFERRING_SEND) {
-              return; // Not in a state to send
-         }
+         if (senderState.status != FileTransferState.Status.TRANSFERRING_SEND) return;
 
          InetSocketAddress peerAddr = context.peerAddrConfirmed.get();
          SecretKey sharedKey = context.peerSymmetricKeys.get(senderState.peerNodeId);
 
+         // Validate connection and resources
         if (peerAddr == null || !senderState.peerNodeId.equals(context.connectedPeerId.get())) {
-             failTransfer(senderState, "Connection lost before sending chunk " + senderState.currentSeqNum.get());
-             return;
+             failTransfer(senderState, "Connection lost before sending chunk " + senderState.currentSeqNum.get()); return;
         }
-         if (sharedKey == null) {
-              System.err.println("[!] CRITICAL: No shared key found for peer " + senderState.peerNodeId + ". Cannot encrypt file data.");
-              failTransfer(senderState, "Missing encryption key");
-              return;
-         }
-         if (senderState.inputStream == null) {
-              System.err.println("[!] CRITICAL: Input stream is null for sending transfer " + senderState.transferId);
-              failTransfer(senderState, "File input stream lost");
-              return;
-         }
-
+        if (sharedKey == null) { failTransfer(senderState, "Missing encryption key"); return; }
+        if (senderState.inputStream == null) { failTransfer(senderState, "File input stream lost"); return; }
 
         try {
             byte[] chunk = new byte[NodeConfig.FILE_CHUNK_SIZE];
             int bytesRead = senderState.inputStream.read(chunk);
 
             if (bytesRead == -1) {
-                 // We've read the whole file according to the stream
-                 // Check if transferred bytes match expected size. If not, something is wrong.
-                 if (senderState.transferredBytes.get() < senderState.filesize) {
-                      System.err.println("[!] Unexpected end of file reached for transfer " + senderState.transferId + " but expected more bytes.");
-                      failTransfer(senderState, "Premature EOF");
-                 } else {
-                      // This means we sent the last chunk but are somehow asked to send more. Should not happen if completion logic is correct.
-                       System.err.println("[!] Stream ended but file size seems complete for transfer " + senderState.transferId + ". Assuming complete.");
-                       // Mark as complete just in case, although final ACK is the real trigger
-                       if(senderState.status != FileTransferState.Status.COMPLETED) {
-                           senderState.status = FileTransferState.Status.COMPLETED;
-                           senderState.closeStreams();
-                           context.ongoingTransfers.remove(senderState.transferId);
-                           context.redrawPrompt.set(true);
-                       }
+                // Should not happen if completion logic (isLastAck in handleFileAck) is correct
+                 System.err.println("[!] Unexpected EOF reached for transfer " + senderState.transferId.substring(0,8) + " after ACK for chunk " + senderState.lastAckReceivedSeqNum.get());
+                 // If we somehow get here, assume complete based on last ACK
+                 if(senderState.status != FileTransferState.Status.COMPLETED) {
+                     failTransfer(senderState, "Unexpected EOF after sending"); // Fail defensively
                  }
                  return;
             }
 
             byte[] actualChunk;
-            boolean isLast = (senderState.transferredBytes.get() + bytesRead >= senderState.filesize);
+            // Determine if this is the last chunk based on bytes read *relative to filesize*
+             boolean isLast = (senderState.transferredBytes.get() + bytesRead >= senderState.filesize);
+
             if (bytesRead < NodeConfig.FILE_CHUNK_SIZE) {
-                 // This is the last chunk (or the only chunk)
                  actualChunk = new byte[bytesRead];
                  System.arraycopy(chunk, 0, actualChunk, 0, bytesRead);
                  if (!isLast) {
-                     // File size mismatch or calculation error?
-                     System.err.println("[!] Read less than chunk size but not calculated as last chunk for " + senderState.transferId + ". Marking as last.");
-                     isLast = true;
+                     System.err.printf("[!] Read %d bytes (expected %d) but not calculated as last chunk for %s. Forcing isLast=true.\n",
+                                       bytesRead, NodeConfig.FILE_CHUNK_SIZE, senderState.transferId.substring(0,8));
+                     isLast = true; // Force last chunk flag
                  }
             } else {
                  actualChunk = chunk;
             }
 
-            // Base64 encode the raw chunk *before* encryption, as encryption handles bytes directly
+            // Base64 encode raw chunk, then encrypt the result
             String chunkBase64 = Base64.getEncoder().encodeToString(actualChunk);
-
-            // Encrypt the Base64 encoded string
             CryptoUtils.EncryptedPayload encryptedPayload = CryptoUtils.encrypt(chunkBase64, sharedKey);
 
+            int currentSeq = senderState.currentSeqNum.get();
             JSONObject dataMsg = new JSONObject();
             dataMsg.put("action", "file_data");
             dataMsg.put("node_id", context.myNodeId.get());
             dataMsg.put("transfer_id", senderState.transferId);
-            dataMsg.put("seq_num", senderState.currentSeqNum.get());
+            dataMsg.put("seq_num", currentSeq);
             dataMsg.put("iv", encryptedPayload.ivBase64);
             dataMsg.put("e_payload", encryptedPayload.ciphertextBase64);
             dataMsg.put("is_last", isLast);
@@ -651,145 +655,111 @@ public class FileTransferService {
             boolean sent = networkManager.sendUdp(dataMsg, peerAddr);
             if (sent) {
                 senderState.lastPacketSentTime.set(System.currentTimeMillis()); // Record time for timeout check
-                // Update transferredBytes *after* successful send attempt (potential retry needs this amount)
-                // But the actual increment towards filesize happens on ACK
-                // Let's track *attempted* sent bytes separately? No, keep it simple.
-                // Update based on this attempt, ACK confirms it for the next step.
+                // Update total bytes *attempted* to send (confirmation comes from ACK)
                 senderState.transferredBytes.addAndGet(actualChunk.length);
 
-                // Optional: Print progress
-                 long totalChunks = (long) Math.ceil((double) senderState.filesize / NodeConfig.FILE_CHUNK_SIZE);
-                 // Avoid division by zero if filesize is 0 (checked earlier but good practice)
-                 totalChunks = Math.max(1, totalChunks);
-                 System.out.printf("[FileTransfer:%s] Sent chunk %d/%d%n",
-                                    senderState.transferId.substring(0,4),
-                                    senderState.currentSeqNum.get(),
-                                    totalChunks - 1); // Seq num is 0-based
-                 context.redrawPrompt.set(true);
-
+                // <<< Notify GUI: Progress update >>>
+                 if (guiCallback != null) {
+                     // Update progress frequently or based on seqNum modulo
+                     if (currentSeq % 10 == 0 || isLast) { // Update every 10 chunks or on last
+                         guiCallback.updateTransferProgress(senderState.transferId, senderState.filename, senderState.transferredBytes.get(), senderState.filesize, true, senderState.status);
+                     }
+                 }
+                if (isLast) {
+                     System.out.println("[*] Sent final chunk (" + currentSeq + ") for transfer " + senderState.transferId.substring(0,8) + ". Waiting for final ACK.");
+                }
 
             } else {
-                System.err.println("[!] Failed to send chunk " + senderState.currentSeqNum.get() + " for transfer " + senderState.transferId);
+                System.err.println("[!] Failed to send chunk " + currentSeq + " for transfer " + senderState.transferId.substring(0,8));
                 // Let timeout handler deal with retries/failure
-                senderState.lastPacketSentTime.set(0); // Ensure timeout triggers if send fails immediately
+                senderState.lastPacketSentTime.set(0); // Ensure timeout check happens if needed
             }
 
-            if (isLast && sent) {
-                 // If last chunk sent successfully, don't close stream yet, wait for final ACK
-                 System.out.println("[*] Sent final chunk (" + senderState.currentSeqNum.get() + ") for transfer " + senderState.transferId + ". Waiting for final ACK.");
-            }
-
-        } catch (IOException e) {
-            System.err.println("[!] Error reading file chunk for transfer " + senderState.transferId + ": " + e.getMessage());
-            failTransfer(senderState, "File read error");
-        } catch (GeneralSecurityException e) {
-            System.err.println("[!] Error encrypting file chunk " + senderState.currentSeqNum.get() + " for transfer " + senderState.transferId + ": " + e.getMessage());
-            failTransfer(senderState, "Encryption error");
+        } catch (IOException e) { failTransfer(senderState, "File read error (chunk " + senderState.currentSeqNum.get() + ")");
+        } catch (GeneralSecurityException e) { failTransfer(senderState, "Encryption error (chunk " + senderState.currentSeqNum.get() + ")");
+        } catch (Exception e) {
+             System.err.println("[!!!] Unexpected error sending chunk " + senderState.currentSeqNum.get() + ": " + e.getMessage());
+             e.printStackTrace();
+             failTransfer(senderState, "Unexpected error sending chunk");
         }
     }
 
      // Periodically checks for timed out chunks for sending transfers
      private void checkTimeouts() {
-         if (context.ongoingTransfers.isEmpty()) return;
+         if (context.ongoingTransfers.isEmpty() || !context.running.get()) return;
 
          long now = System.currentTimeMillis();
          context.ongoingTransfers.forEach((id, state) -> {
-             // Check only transfers where we are the sender and currently transferring
+             // Check only active sending transfers
              if (state.isSender && state.status == FileTransferState.Status.TRANSFERRING_SEND) {
-                 // Check if we are waiting for an ACK (current seq num > last ack received)
+                 // Check if we are waiting for an ACK
                  if (state.currentSeqNum.get() > state.lastAckReceivedSeqNum.get()) {
                      long lastSent = state.lastPacketSentTime.get();
                      if (lastSent > 0 && (now - lastSent > NodeConfig.FILE_ACK_TIMEOUT_MS)) {
-                         // Timeout occurred!
+                         // Timeout!
                          if (state.retryCount.incrementAndGet() <= NodeConfig.FILE_MAX_RETRIES) {
-                              System.out.println("\n[!] Timeout waiting for ACK for chunk " + state.currentSeqNum.get()
-                                                 + " (Transfer " + id.substring(0,4) + "). Retrying ("
-                                                 + state.retryCount.get() + "/" + NodeConfig.FILE_MAX_RETRIES + ")...");
-                              context.redrawPrompt.set(true);
-                              // Resend the *same* chunk
-                              resendChunk(state);
+                              String retryMsg = String.format("Timeout waiting for ACK chunk %d (Transfer %s). Retrying (%d/%d)...",
+                                                             state.currentSeqNum.get(), id.substring(0,4), state.retryCount.get(), NodeConfig.FILE_MAX_RETRIES);
+                              System.out.println("\n[!] " + retryMsg);
+                              // <<< Notify GUI (Optional): Indicate retry attempt? >>>
+                              // if (guiCallback != null) guiCallback.appendMessage("System: " + retryMsg);
+                               if (guiCallback != null) { // Update progress bar status text
+                                     guiCallback.updateTransferProgress(id, state.filename, state.transferredBytes.get(), state.filesize, true, state.status); // Resend current status
+                               }
+                              resendChunk(state); // Attempt to resend
                          } else {
-                              System.out.println("\n[!] Max retries exceeded for chunk " + state.currentSeqNum.get()
-                                                 + " (Transfer " + id.substring(0,4) + "). Failing transfer.");
-                              context.redrawPrompt.set(true);
-                              failTransfer(state, "Timeout waiting for ACK");
+                              String failMsg = String.format("Max retries exceeded for chunk %d (Transfer %s). Failing transfer.",
+                                                             state.currentSeqNum.get(), id.substring(0,4));
+                              System.out.println("\n[!] " + failMsg);
+                              failTransfer(state, "Timeout waiting for ACK"); // Handles GUI update
                          }
                      }
                  } else {
-                      // We have received ACK for the last sent packet, reset timer logic state if needed
-                      state.lastPacketSentTime.set(0); // Ensure timeout doesn't trigger erroneously if processing next chunk is delayed
+                      // ACK received for last sent packet, reset timer timestamp
+                      state.lastPacketSentTime.set(0);
                  }
              }
          });
      }
 
-     // Helper to resend the current chunk
-     // NOTE: This implementation relies on being able to re-read the chunk from the input stream.
-     // This requires the stream to be reset or the file to be reopened and seeked.
-     // For simplicity, we attempt to reset the stream if supported. Otherwise, this might fail.
+     // Helper to resend the current chunk (seek and read approach)
      private void resendChunk(FileTransferState senderState) {
           InetSocketAddress peerAddr = context.peerAddrConfirmed.get();
           SecretKey sharedKey = context.peerSymmetricKeys.get(senderState.peerNodeId);
+          int currentSeq = senderState.currentSeqNum.get(); // Chunk to resend
 
-          if (peerAddr == null || !senderState.peerNodeId.equals(context.connectedPeerId.get())) {
-               failTransfer(senderState, "Connection lost before resending chunk " + senderState.currentSeqNum.get());
-               return;
-          }
-          if (sharedKey == null || senderState.inputStream == null) {
-               failTransfer(senderState, "Missing key or stream for resend");
-               return;
-          }
+          // Validate connection and resources
+          if (peerAddr == null || !senderState.peerNodeId.equals(context.connectedPeerId.get())) { failTransfer(senderState, "Connection lost before resending chunk " + currentSeq); return; }
+          if (sharedKey == null) { failTransfer(senderState, "Missing key for resend"); return; }
+          // Input stream needs to be valid and capable of seeking/re-reading
+          // Reopening is simpler than managing mark/reset
+          if (senderState.sourcePath == null) { failTransfer(senderState, "Missing source path for resend"); return; }
+
 
           try {
-              // --- Attempt to re-read the specific chunk ---
-              byte[] actualChunk = null;
-              boolean isLast = false;
-              long offset = (long)senderState.currentSeqNum.get() * NodeConfig.FILE_CHUNK_SIZE;
+              // --- Calculate chunk details ---
+              long offset = (long)currentSeq * NodeConfig.FILE_CHUNK_SIZE;
               int bytesToRead = NodeConfig.FILE_CHUNK_SIZE;
               long remainingBytes = senderState.filesize - offset;
+              boolean isLast = false;
 
-              if (remainingBytes <= 0) {
-                   System.err.println("[!] Resend requested for chunk " + senderState.currentSeqNum.get() + " but file size indicates completion.");
-                   // This might happen if the last ACK was lost. Consider if we should just assume complete or fail.
-                   // Let's try sending one more 'last packet' if it matches the size calculation? Risky.
-                   // For now, fail defensively.
-                   failTransfer(senderState, "Resend state mismatch with file size");
-                   return;
-              }
+              if (remainingBytes <= 0) { failTransfer(senderState, "Resend state mismatch with file size"); return; }
+              if (remainingBytes < bytesToRead) { bytesToRead = (int) remainingBytes; isLast = true; }
 
-              if (remainingBytes < bytesToRead) {
-                  bytesToRead = (int) remainingBytes; // Read only the remaining bytes
-                  isLast = true;
-              }
+              // --- Re-read the specific chunk ---
+              byte[] actualChunk;
+              try (InputStream tempStream = new BufferedInputStream(Files.newInputStream(senderState.sourcePath))) {
+                   long skipped = tempStream.skip(offset);
+                   if (skipped != offset) { throw new IOException("Failed to skip to offset " + offset + " for resend (skipped " + skipped + ")"); }
 
-              // Re-reading strategy: Close and reopen the stream, then skip bytes. Crude but avoids mark/reset issues.
-              // TODO: A more efficient approach would use FileChannel for seeking.
-              try {
-                   senderState.inputStream.close(); // Close current stream
-                   senderState.inputStream = new BufferedInputStream(Files.newInputStream(senderState.sourcePath)); // Reopen
-                   long skipped = senderState.inputStream.skip(offset); // Skip to the required offset
-                   if (skipped != offset) {
-                        throw new IOException("Failed to skip to correct offset for resend.");
-                   }
+                   byte[] chunkBuffer = new byte[bytesToRead];
+                   int bytesActuallyRead = tempStream.read(chunkBuffer);
+                   if (bytesActuallyRead != bytesToRead) { throw new IOException("Mismatch re-reading chunk " + currentSeq + " (read " + bytesActuallyRead + " != expected " + bytesToRead + ")"); }
+                   actualChunk = chunkBuffer;
               } catch (IOException e) {
-                   System.err.println("[!] Failed to reposition stream for resend: " + e.getMessage());
-                   failTransfer(senderState, "Stream reposition failed for resend");
+                   System.err.println("[!] Failed to reopen/read stream for resend: " + e.getMessage());
+                   failTransfer(senderState, "Stream reposition/read failed for resend");
                    return;
-              }
-
-              byte[] chunk = new byte[bytesToRead];
-              int bytesRead = senderState.inputStream.read(chunk);
-
-              if (bytesRead != bytesToRead) {
-                   System.err.println("[!] Mismatch reading chunk for resend (" + bytesRead + " != " + bytesToRead + ")");
-                   failTransfer(senderState, "Chunk re-read error");
-                   return;
-              }
-              actualChunk = chunk;
-              // --- End re-read attempt ---
-
-              if (actualChunk == null) { // Safety check if re-read failed silently
-                  throw new IOException("Failed to obtain chunk data for resend.");
               }
 
               // Base64 encode and encrypt
@@ -800,93 +770,74 @@ public class FileTransferService {
               dataMsg.put("action", "file_data");
               dataMsg.put("node_id", context.myNodeId.get());
               dataMsg.put("transfer_id", senderState.transferId);
-              dataMsg.put("seq_num", senderState.currentSeqNum.get());
+              dataMsg.put("seq_num", currentSeq); // Send the same sequence number
               dataMsg.put("iv", encryptedPayload.ivBase64);
               dataMsg.put("e_payload", encryptedPayload.ciphertextBase64);
               dataMsg.put("is_last", isLast);
 
               boolean sent = networkManager.sendUdp(dataMsg, peerAddr);
               if (sent) {
-                  senderState.lastPacketSentTime.set(System.currentTimeMillis()); // Update sent time for next timeout check
-                  System.out.println("[*] Resent chunk " + senderState.currentSeqNum.get() + " for transfer " + senderState.transferId.substring(0,4) + "...");
-                  context.redrawPrompt.set(true);
+                  senderState.lastPacketSentTime.set(System.currentTimeMillis()); // Update sent time
+                  System.out.println("[*] Resent chunk " + currentSeq + " for transfer " + senderState.transferId.substring(0,4) + "...");
+                  // No GUI progress update needed unless showing retry count specifically
               } else {
-                  System.err.println("[!] Failed to resend chunk " + senderState.currentSeqNum.get() + " for transfer " + senderState.transferId);
-                  // Allow timeout mechanism to eventually fail the transfer after max retries
+                  System.err.println("[!] Failed to resend chunk " + currentSeq + " for transfer " + senderState.transferId.substring(0,4));
                   senderState.lastPacketSentTime.set(0); // Ensure timeout still active
               }
 
-          } catch (IOException e) {
-               System.err.println("[!] IO Error during attempt to resend chunk " + senderState.currentSeqNum.get() + ": " + e.getMessage());
-               failTransfer(senderState, "Error during chunk resend IO");
-          } catch (GeneralSecurityException e) {
-              System.err.println("[!] Encryption Error during attempt to resend chunk " + senderState.currentSeqNum.get() + ": " + e.getMessage());
-              failTransfer(senderState, "Error during chunk resend encryption");
-          } catch (Exception e) {
-              System.err.println("[!] Unexpected Error during attempt to resend chunk " + senderState.currentSeqNum.get() + ": " + e.getMessage());
-              e.printStackTrace();
-              failTransfer(senderState, "Unexpected error during chunk resend");
+          } catch (GeneralSecurityException e) { failTransfer(senderState, "Error during chunk resend encryption (chunk " + currentSeq + ")");
+          } catch (Exception e) { // Catch broader exceptions during resend logic
+               System.err.println("[!] Unexpected Error during attempt to resend chunk " + currentSeq + ": " + e.getMessage());
+               e.printStackTrace();
+               failTransfer(senderState, "Unexpected error during chunk resend");
           }
      }
 
-     // Fails a transfer and cleans up resources
+     // Fails a transfer and cleans up resources, notifying GUI
      public void failTransfer(FileTransferState state, String reason) {
-          if (state.isTerminated()) return; // Already finished
+          if (state == null || state.isTerminated()) return; // Already finished or null state
 
-          System.out.println("\n[!] File transfer FAILED: '" + state.filename + "' [ID: " + state.transferId + "]. Reason: " + reason);
-          // ---> ADD LOGGING <---
+          String failMsg = String.format("File transfer FAILED: '%s' [ID: %s]. Reason: %s",
+                                         state.filename, state.transferId.substring(0,8), reason);
+          System.out.println("\n[!] " + failMsg);
+
+          // Log event before changing state/removing
           String direction = state.isSender ? "SENT" : "RECEIVED";
-          String logReason = reason != null ? reason : "Unknown";
-          // Ensure state is not null and peerNodeId is available before logging
-          if (state != null && state.peerNodeId != null) {
-               logTransferEvent(state, direction, "[File Transfer] FAILED " + (state.isSender ? "sending" : "receiving") + " '" + state.filename + "'. Reason: " + logReason);
+          if (state.peerNodeId != null) {
+               logTransferEvent(state, direction, "[File Transfer] FAILED " + (state.isSender ? "sending" : "receiving") + " '" + state.filename + "'. Reason: " + reason);
           }
-          // ---> END LOGGING <---
 
           state.status = FileTransferState.Status.FAILED;
+
+          // <<< Notify GUI: Transfer finished (failed) >>>
+          if (guiCallback != null) {
+              guiCallback.transferFinished(state.transferId, "Failed: " + reason);
+          }
+
+          // Cleanup
           state.closeStreams();
           context.ongoingTransfers.remove(state.transferId); // Remove failed transfer from map
-          context.redrawPrompt.set(true); // Update UI
-
-          // Optional: Notify peer about failure? Could send a 'file_fail' message.
-          // For simplicity, we won't implement peer notification on failure for now.
      }
 
-     // Add this helper method to FileTransferService.java
+     // Helper method to log transfer events to chat history
      private void logTransferEvent(FileTransferState state, String direction, String message) {
-         // Ensure state and peerNodeId are valid before proceeding
-         if (state == null || state.peerNodeId == null) {
-              System.err.println("[!] Cannot log transfer event: Invalid state or peerNodeId.");
-              return;
-         }
+         if (state == null || state.peerNodeId == null) return; // Basic validation
 
          if (context.chatHistoryManager != null) {
              long timestamp = System.currentTimeMillis();
-             // Attempt to get the connected peer's username, fallback if needed
-             String peerUsername = null;
-             // Check if the peer involved in the transfer is the currently connected one
-             if (state.peerNodeId.equals(context.connectedPeerId.get())) {
-                 peerUsername = context.connectedPeerUsername.get();
-             }
-             // Fallback if username is null or peer isn't the currently connected one
-             if (peerUsername == null || peerUsername.isEmpty()) {
-                  // Use peer ID as fallback username info
+             String peerUsername = context.getPeerDisplayName(); // Use context helper for best name
+             // Ensure peerUsername isn't null if possible, fallback needed if context disconnected
+             if (peerUsername.equals("???") || peerUsername.equals("N/A")) {
                   peerUsername = state.peerNodeId.substring(0, Math.min(8, state.peerNodeId.length())) + "...";
              }
 
-
              context.chatHistoryManager.addMessage(
                      timestamp,
-                     state.peerNodeId, // Log the ID of the peer involved in the transfer
-                     peerUsername,     // Use best available username
-                     direction,        // "SENT" or "RECEIVED"
-                     message           // Formatted message
+                     state.peerNodeId,
+                     peerUsername,
+                     direction, // Should be "SYSTEM" or similar for file events? Using SENT/RECEIVED for now.
+                     message
              );
-         } else {
-              // Only print error if we expect history manager (i.e., connected)
-              if (context.currentState.get() == NodeState.CONNECTED_SECURE) {
-                 System.err.println("[!] ChatHistoryManager not available, cannot log file transfer event.");
-              }
          }
      }
 }

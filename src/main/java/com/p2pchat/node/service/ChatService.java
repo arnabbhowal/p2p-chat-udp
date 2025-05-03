@@ -2,69 +2,105 @@ package main.java.com.p2pchat.node.service;
 
 import main.java.com.p2pchat.common.CryptoUtils;
 import main.java.com.p2pchat.node.model.NodeContext;
-import main.java.com.p2pchat.node.model.NodeState; // Still needed for state check in sendChatMessage
+import main.java.com.p2pchat.node.model.NodeState;
 import main.java.com.p2pchat.node.network.NetworkManager;
+// Import the callback interface
+import main.java.com.p2pchat.node.ui.GuiCallback;
 
 import org.json.JSONObject;
 import javax.crypto.SecretKey;
-// import java.net.InetSocketAddress; // No longer needed here
 import java.security.*;
-import java.security.spec.InvalidKeySpecException; // Added for catch block
-
+import java.security.spec.InvalidKeySpecException;
 
 public class ChatService {
 
     private final NodeContext context;
     private final NetworkManager networkManager;
+    private GuiCallback guiCallback = null; // <<< Added callback reference
 
     public ChatService(NodeContext context, NetworkManager networkManager) {
         this.context = context;
         this.networkManager = networkManager;
     }
 
-     // Called by ServerMessageHandler when connection_info received
-     public boolean generateSharedKeyAndStore(String peerId, String peerPublicKeyBase64) {
-         if (context.myKeyPair == null) { System.err.println("[!] Cannot generate shared key: Own keypair is missing."); return false; }
-         if (peerId == null || peerPublicKeyBase64 == null) { System.err.println("[!] Cannot generate shared key: Peer info missing."); return false; }
+    // <<< Added setter for callback >>>
+    public void setGuiCallback(GuiCallback callback) {
+        this.guiCallback = callback;
+    }
 
-         try {
-             PublicKey peerPublicKey = CryptoUtils.decodePublicKey(peerPublicKeyBase64);
-             System.out.println("[*] Performing ECDH key agreement with peer " + peerId + "...");
-             byte[] sharedSecretBytes = CryptoUtils.generateSharedSecret(context.myKeyPair.getPrivate(), peerPublicKey);
+    // Called by ServerMessageHandler when connection_info received
+    public boolean generateSharedKeyAndStore(String peerId, String peerPublicKeyBase64) {
+        String peerDisplay = peerId != null ? peerId.substring(0,Math.min(8, peerId.length())) + "..." : "peer";
+        if (context.myKeyPair == null) {
+            String msg = "[!] Cannot generate shared key: Own keypair is missing.";
+            System.err.println(msg);
+            // <<< Notify GUI >>> (Maybe not needed here, handled by connection failure?)
+            // if (guiCallback != null) guiCallback.appendMessage("System: Error - " + msg);
+            return false;
+        }
+        if (peerId == null || peerPublicKeyBase64 == null) {
+             String msg = "[!] Cannot generate shared key: Peer info missing.";
+             System.err.println(msg);
+             // <<< Notify GUI >>> (Maybe not needed here)
+             // if (guiCallback != null) guiCallback.appendMessage("System: Error - " + msg);
+             return false;
+        }
 
-             System.out.println("[*] Deriving AES symmetric key from shared secret...");
-             SecretKey derivedKey = CryptoUtils.deriveSymmetricKey(sharedSecretBytes);
+        try {
+            PublicKey peerPublicKey = CryptoUtils.decodePublicKey(peerPublicKeyBase64);
+            System.out.println("[*] Performing ECDH key agreement with peer " + peerDisplay + "...");
+            byte[] sharedSecretBytes = CryptoUtils.generateSharedSecret(context.myKeyPair.getPrivate(), peerPublicKey);
 
-             context.peerSymmetricKeys.put(peerId, derivedKey);
-             context.sharedKeyEstablished.set(true); // Signal success
-             System.out.println("[+] Shared symmetric key established successfully for peer " + peerId + "!");
-             return true;
+            System.out.println("[*] Deriving AES symmetric key from shared secret...");
+            SecretKey derivedKey = CryptoUtils.deriveSymmetricKey(sharedSecretBytes);
 
-         // Added InvalidKeySpecException catch which might be thrown by decodePublicKey
-         } catch (NoSuchAlgorithmException | InvalidKeyException | InvalidKeySpecException e) {
-              System.err.println("[!] Cryptographic error during key exchange: " + e.getMessage());
-         } catch (Exception e) {
-              System.err.println("[!] Unexpected error during shared key generation: " + e.getMessage());
-              e.printStackTrace();
-         }
-         context.sharedKeyEstablished.set(false); // Ensure flag is false on error
-         return false;
-     }
+            context.peerSymmetricKeys.put(peerId, derivedKey);
+            context.sharedKeyEstablished.set(true); // Signal success
+            String successMsg = "[+] Shared symmetric key established successfully for peer " + peerDisplay + "!";
+            System.out.println(successMsg);
+            // <<< Notify GUI >>>
+            if (guiCallback != null) {
+                 // No direct state change, but log success
+                 // guiCallback.appendMessage("System: Key exchange successful with " + peerDisplay);
+            }
+            return true;
 
-    // Called by UI to send a message (only if command is 'chat' or 'c')
+        } catch (NoSuchAlgorithmException | InvalidKeyException | InvalidKeySpecException e) {
+            String errorMsg = "[!] Cryptographic error during key exchange with " + peerDisplay + ": " + e.getMessage();
+            System.err.println(errorMsg);
+             if (guiCallback != null) {
+                 // guiCallback.appendMessage("System: Error - Key exchange failed: " + e.getMessage());
+             }
+        } catch (Exception e) {
+            String errorMsg = "[!] Unexpected error during shared key generation with " + peerDisplay + ": " + e.getMessage();
+            System.err.println(errorMsg);
+             if (guiCallback != null) {
+                // guiCallback.appendMessage("System: Error - Unexpected key exchange failure.");
+             }
+            e.printStackTrace();
+        }
+        context.sharedKeyEstablished.set(false); // Ensure flag is false on error
+        return false;
+    }
+
+    // Called by GUI to send a message
     public void sendChatMessage(String message) {
+        // State check is done by the GUI before calling this, but double-check
         if (context.currentState.get() != NodeState.CONNECTED_SECURE) {
-             // State check is done by the UI before calling this
-             return;
+            if (guiCallback != null) guiCallback.appendMessage("System: Cannot send, not connected.");
+            return;
         }
 
         java.net.InetSocketAddress peerAddr = context.peerAddrConfirmed.get();
         String peerId = context.connectedPeerId.get();
         SecretKey sharedKey = (peerId != null) ? context.peerSymmetricKeys.get(peerId) : null;
+        String peerDisplay = context.getPeerDisplayName(); // For logging
 
         if (peerAddr == null || peerId == null || sharedKey == null) {
-             System.out.println("\n[!] Cannot send chat message: Missing peer address, ID, or key."); // Add newline for clarity
-             return;
+            String msg = "[!] Cannot send chat message: Missing peer address, ID, or key.";
+            System.err.println(msg);
+            if (guiCallback != null) guiCallback.appendMessage("System: Error - " + msg);
+            return;
         }
 
         try {
@@ -78,58 +114,87 @@ public class ChatService {
 
             boolean sent = networkManager.sendUdp(chatMsg, peerAddr);
 
-            if (sent && context.chatHistoryManager != null) {
+            // Log sent message AFTER attempting send
+            if (context.chatHistoryManager != null) {
                 long timestamp = System.currentTimeMillis();
                 context.chatHistoryManager.addMessage(timestamp, peerId, context.connectedPeerUsername.get(), "SENT", message);
+                 // <<< Notify GUI - Display own sent message >>>
+                 if (guiCallback != null) {
+                     guiCallback.appendMessage("[You]: " + message);
+                 }
+            } else if (guiCallback != null) {
+                 // If history isn't working, still show own message in GUI
+                 guiCallback.appendMessage("[You]: " + message);
             }
-            if (!sent) System.out.println("\n[!] Failed to send chat message. Connection might be lost."); // Add newline
 
-        } catch (GeneralSecurityException e) { System.err.println("\n[!] Failed to encrypt message: " + e.getMessage()); // Add newline
-        } catch (Exception e) { System.err.println("\n[!] Unexpected error sending chat message: " + e.getMessage()); } // Add newline
+
+            if (!sent) {
+                 String failMsg = "[!] Failed to send chat message to " + peerDisplay + ". Connection might be lost.";
+                 System.err.println(failMsg);
+                 if (guiCallback != null) guiCallback.appendMessage("System: Error - " + failMsg);
+                 // Consider triggering connection loss check
+                 // connectionService.handleConnectionLoss(); // Let network errors trigger this?
+            }
+
+        } catch (GeneralSecurityException e) {
+             String errorMsg = "[!] Failed to encrypt message: " + e.getMessage();
+             System.err.println(errorMsg);
+             if (guiCallback != null) guiCallback.appendMessage("System: Error - " + errorMsg);
+        } catch (Exception e) {
+             String errorMsg = "[!] Unexpected error sending chat message: " + e.getMessage();
+             System.err.println(errorMsg);
+             if (guiCallback != null) guiCallback.appendMessage("System: Error - " + errorMsg);
+             e.printStackTrace();
+        }
     }
 
-     // Called by PeerMessageHandler when e_chat received
-     public void receiveEncryptedChat(JSONObject data) {
-         String peerId = context.connectedPeerId.get();
-         SecretKey sharedKey = (peerId != null) ? context.peerSymmetricKeys.get(peerId) : null;
+    // Called by PeerMessageHandler when e_chat received
+    public void receiveEncryptedChat(JSONObject data) {
+        String peerId = context.connectedPeerId.get();
+        SecretKey sharedKey = (peerId != null) ? context.peerSymmetricKeys.get(peerId) : null;
+        String peerDisplay = context.getPeerDisplayName(); // Get sender display name
 
-          if (sharedKey == null) {
-               // Added newline for cleaner error printing
-               System.err.println("\n[!] CRITICAL: No shared key found for connected peer " + context.getPeerDisplayName() + ". Cannot decrypt.");
-               // Should ideally disconnect here, but rely on ConnectionService/PeerMessageHandler for now
-               return;
-          }
+        if (sharedKey == null) {
+            String errorMsg = "[!] CRITICAL: No shared key found for connected peer " + peerDisplay + ". Cannot decrypt.";
+            System.err.println("\n" + errorMsg); // Add newline for visibility
+            if (guiCallback != null) guiCallback.appendMessage("System: Error - " + errorMsg);
+            // Should potentially disconnect here or signal critical error
+            return;
+        }
 
-         CryptoUtils.EncryptedPayload payload = CryptoUtils.EncryptedPayload.fromJson(data);
-         if (payload == null) {
-              // Added newline
-             System.err.println("\n[!] Received invalid encrypted chat payload from " + context.getPeerDisplayName());
-             context.redrawPrompt.set(true); // *** Signal redraw even on payload error ***
-             return;
-         }
-         try {
-             String decryptedMessage = CryptoUtils.decrypt(payload, sharedKey);
+        CryptoUtils.EncryptedPayload payload = CryptoUtils.EncryptedPayload.fromJson(data);
+        if (payload == null) {
+            String errorMsg = "[!] Received invalid encrypted chat payload from " + peerDisplay;
+            System.err.println("\n" + errorMsg);
+            if (guiCallback != null) guiCallback.appendMessage("System: Error - " + errorMsg);
+            return;
+        }
+        try {
+            String decryptedMessage = CryptoUtils.decrypt(payload, sharedKey);
 
-             // Use println to print the message on its own line.
-             System.out.println("[" + context.getPeerDisplayName() + "]: " + decryptedMessage);
+            // <<< Notify GUI >>>
+            if (guiCallback != null) {
+                guiCallback.appendMessage("[" + peerDisplay + "]: " + decryptedMessage);
+            } else { // Fallback to console if no GUI
+                System.out.println("[" + peerDisplay + "]: " + decryptedMessage);
+            }
 
-             // *** Signal the UI thread that the prompt might need redrawing ***
-             context.redrawPrompt.set(true);
+            // Log to history AFTER decrypting
+            if (context.chatHistoryManager != null) {
+                long timestamp = System.currentTimeMillis();
+                String senderId = data.optString("node_id", peerId); // Use sender from packet if available
+                context.chatHistoryManager.addMessage(timestamp, senderId, context.connectedPeerUsername.get(), "RECEIVED", decryptedMessage);
+            }
 
-             if (context.chatHistoryManager != null) {
-                 long timestamp = System.currentTimeMillis();
-                 String senderId = data.optString("node_id", peerId); // Use sender from packet if available, else assume connected peer
-                 context.chatHistoryManager.addMessage(timestamp, senderId, context.connectedPeerUsername.get(), "RECEIVED", decryptedMessage);
-             }
-
-         } catch (GeneralSecurityException e) {
-              // Added newline for cleaner error printing
-              System.err.println("\n[!] Failed to decrypt message from " + context.getPeerDisplayName() + ". " + e.getMessage());
-              context.redrawPrompt.set(true); // *** Signal redraw on decryption error ***
-         } catch (Exception e) {
-              // Added newline
-             System.err.println("\n[!] Error handling decrypted message from " + context.getPeerDisplayName() + ": " + e.getMessage());
-             context.redrawPrompt.set(true); // *** Signal redraw on other errors ***
-         }
-     }
+        } catch (GeneralSecurityException e) {
+            String errorMsg = "[!] Failed to decrypt message from " + peerDisplay + ". " + e.getMessage();
+            System.err.println("\n" + errorMsg);
+            if (guiCallback != null) guiCallback.appendMessage("System: Error - " + errorMsg);
+        } catch (Exception e) {
+            String errorMsg = "[!] Error handling decrypted message from " + peerDisplay + ": " + e.getMessage();
+            System.err.println("\n" + errorMsg);
+            if (guiCallback != null) guiCallback.appendMessage("System: Error - " + errorMsg);
+            e.printStackTrace();
+        }
+    }
 }

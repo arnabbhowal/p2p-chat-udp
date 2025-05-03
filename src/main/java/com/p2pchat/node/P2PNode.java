@@ -9,216 +9,246 @@ import main.java.com.p2pchat.node.network.PeerMessageHandler;
 import main.java.com.p2pchat.node.network.ServerMessageHandler;
 import main.java.com.p2pchat.node.service.ChatService;
 import main.java.com.p2pchat.node.service.ConnectionService;
-import main.java.com.p2pchat.node.service.FileTransferService; // Added
+import main.java.com.p2pchat.node.service.FileTransferService;
 import main.java.com.p2pchat.node.service.RegistrationService;
-import main.java.com.p2pchat.node.ui.CommandLineInterface;
+// Import the GUI class and callback
+import main.java.com.p2pchat.node.ui.GuiCallback;
+import main.java.com.p2pchat.node.ui.P2pChatGui;
 
+import javax.swing.*;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.UnknownHostException;
-import java.util.Scanner;
-
 
 public class P2PNode {
 
+    // Static references accessible for shutdown and GUI initialization
     private static NodeContext nodeContext;
     private static NetworkManager networkManager;
     private static ConnectionService connectionService;
-    private static FileTransferService fileTransferService; // Added
-    private static CommandLineInterface commandLineInterface;
+    private static FileTransferService fileTransferService;
     private static RegistrationService registrationService;
     private static ChatService chatService;
-    private static volatile boolean isShuttingDown = false; // Flag to prevent double shutdown
+    private static P2pChatGui gui; // Reference to the GUI
+    private static volatile boolean isShuttingDown = false;
 
-    public static void main(String[] args) {
-        // Set current time for testing purposes
-         // String testDate = "2025-05-03T14:43:03-04:00"; // Approx time of request
-         // In real code, you'd use Instant.now() or similar
-
-        if (args.length > 0 && args[0] != null && !args[0].trim().isEmpty()) {
-            NodeConfig.SERVER_IP = args[0].trim();
-            System.out.println("[*] Using Server IP from command line: " + NodeConfig.SERVER_IP);
-        } else {
-            if (NodeConfig.SERVER_IP.equals("127.0.0.1")) {
-                System.out.println("[!] WARNING: Using default Server IP '127.0.0.1'. Pass the actual server IP as an argument if nodes are on different machines!");
-            } else {
-                 System.out.println("[*] Using configured Server IP: " + NodeConfig.SERVER_IP);
-            }
-        }
-
-        nodeContext = new NodeContext();
-        nodeContext.currentState.set(NodeState.INITIALIZING);
-
-        // Add shutdown hook EARLY before services are fully active
-        Runtime.getRuntime().addShutdownHook(new Thread(P2PNode::shutdown));
-
-        // --- Initialization ---
-        if (!resolveServerAddress()) return; // Exit if server address fails
-        if (!initializeServices()) return; // Exit if services fail to init
-        if (!registrationService.generateKeys()) return; // Exit if key gen fails
-        if (!networkManager.initializeSocket()) return; // Exit if socket fails
-
-        // --- Get Username ---
-        getUsernameInput();
-
-        // --- Network Setup ---
-        registrationService.discoverLocalEndpoints();
-        networkManager.startListening();
-
-        // --- Registration ---
-         if (!registrationService.registerWithServer()) {
-              System.err.println("[!!!] Failed to register with server. Exiting.");
-              // Shutdown hook will run, but exit explicitly if registration fails critically
-              System.exit(1);
-              return;
-         }
-         // Registration successful, state is now DISCONNECTED
-
-         // --- Print Ready Messages (Moved Here) ---
-         System.out.println("\n--- P2P Node Ready ---");
-         System.out.println("    Username: " + nodeContext.myUsername);
-         System.out.println("    Node ID : " + nodeContext.myNodeId.get());
-         System.out.println("--- Enter 'connect <peer_id>', 'status', 'id', or 'quit' ---");
-         // --- End Ready Messages ---
-
-
-        // --- Start background services and UI ---
-        connectionService.start(); // Start keepalives, pinging logic
-        fileTransferService.start(); // Start file transfer timeout checker
-        commandLineInterface = new CommandLineInterface(nodeContext, connectionService, chatService, fileTransferService); // Pass file transfer service
-
-
-         // Run the UI loop (this will block until quit or error)
-         try {
-            commandLineInterface.run();
-         } finally {
-             // Ensure shutdown is called even if UI loop throws an exception
-             shutdown();
-         }
-
-        System.out.println("[*] Node main method finished.");
-        // JVM will exit if all non-daemon threads (like main) are done
-    }
-
-    private static boolean resolveServerAddress() {
-         System.out.println("[*] Resolving server address: " + NodeConfig.SERVER_IP + ":" + NodeConfig.SERVER_PORT + "...");
-         try {
-              nodeContext.serverAddress = new InetSocketAddress(InetAddress.getByName(NodeConfig.SERVER_IP), NodeConfig.SERVER_PORT);
-              System.out.println("[*] Server address resolved to: " + nodeContext.serverAddress);
-              return true;
-         } catch (UnknownHostException e) {
-              System.err.println("[!!!] FATAL: Could not resolve server hostname: " + NodeConfig.SERVER_IP + " - " + e.getMessage());
-              return false;
-         } catch (SecurityException e) {
-              System.err.println("[!!!] FATAL: Security Manager prevented resolving address: " + e.getMessage());
-              return false;
-         }
-    }
-
-    // Using the cleaner, setter-based initialization
-    private static boolean initializeServices() {
-        try {
-            // Create services, passing dependencies via constructors where possible
-            networkManager = new NetworkManager(nodeContext); // Construct with context only
-            registrationService = new RegistrationService(nodeContext, networkManager);
-            chatService = new ChatService(nodeContext, networkManager);
-            connectionService = new ConnectionService(nodeContext, networkManager);
-            fileTransferService = new FileTransferService(nodeContext, networkManager); // Added
-
-            // Create message handlers which need other services
-            ServerMessageHandler serverMsgHandler = new ServerMessageHandler(nodeContext, connectionService, chatService);
-            // Pass fileTransferService to PeerMessageHandler
-            PeerMessageHandler peerMsgHandler = new PeerMessageHandler(nodeContext, connectionService, chatService, fileTransferService, networkManager);
-            MessageHandler messageHandler = new MessageHandler(nodeContext, serverMsgHandler, peerMsgHandler, connectionService);
-
-            // Inject the fully configured MessageHandler into NetworkManager using the setter
-            networkManager.setMessageHandler(messageHandler);
-
-            return true;
-        } catch(Exception e) {
-             System.err.println("[!!!] FATAL: Failed to initialize node services: " + e.getMessage());
-             e.printStackTrace();
-             return false;
-        }
-    }
-
-    private static void getUsernameInput() {
-        System.out.print("[?] Enter your desired username: ");
-        Scanner inputScanner = new Scanner(System.in); // Use a temporary scanner for username only
-        String inputName = "";
-        // Check if running without an interactive console AND no immediate input
-        // Corrected line:
-        if (System.console() == null && !inputScanner.hasNextLine()) {
-             System.out.println("\n[*] No interactive console detected or input stream closed. Using default username: " + nodeContext.myUsername);
-             inputName = nodeContext.myUsername;
-        } else {
-             while (inputName == null || inputName.trim().isEmpty()) {
-                  // Check if running flag became false (e.g., shutdown initiated)
-                  if (!nodeContext.running.get()) {
-                      System.out.println("\n[*] Shutdown initiated during username input.");
-                      inputName = nodeContext.myUsername; // Use default
-                      break;
-                  }
-                  if (inputScanner.hasNextLine()) {
-                       inputName = inputScanner.nextLine().trim();
-                       if (inputName.isEmpty()) {
-                           System.out.print("[!] Username cannot be empty. Please enter a username: ");
-                       }
-                  } else {
-                       // This case handles if the input stream closes unexpectedly while waiting
-                       System.out.println("\n[*] Input stream closed during username entry. Using default.");
-                       inputName = nodeContext.myUsername; // Keep default
-                       break;
-                  }
-             }
-        }
-         nodeContext.myUsername = inputName.trim(); // Ensure trimmed
-         System.out.println("[*] Username set to: " + nodeContext.myUsername);
-         // We don't close the scanner wrapping System.in
-    }
-
-
-    private static synchronized void shutdown() {
-        // Prevent shutdown() from running multiple times (e.g., from hook and main thread finally block)
+    // --- Static Shutdown Method ---
+    public static synchronized void shutdown() {
         if (isShuttingDown) return;
         isShuttingDown = true;
-
         System.out.println("\n[*] Shutting down node...");
-
-        // Signal all loops to stop FIRST
         if (nodeContext != null) {
             nodeContext.running.set(false);
             nodeContext.currentState.set(NodeState.SHUTTING_DOWN);
+            // Notify GUI about shutdown state
+            if (gui != null) {
+                // Ensure GUI update happens on EDT, though it might be closing anyway
+                SwingUtilities.invokeLater(() -> gui.updateState(NodeState.SHUTTING_DOWN, null, null));
+            }
         }
+        // Stop services in appropriate order
+        if (fileTransferService != null) fileTransferService.stop();
+        if (connectionService != null) connectionService.stop();
+        if (networkManager != null) networkManager.stop(); // Stops listener and socket
 
-        // Stop services that have background threads
-        // Order might matter slightly - stop accepting new work before stopping listeners
-         if (fileTransferService != null) {
-             fileTransferService.stop(); // Stops timeout checker
-         }
-        if (connectionService != null) {
-            connectionService.stop(); // Stops connection manager thread
+        // Clean up context data
+        if (nodeContext != null) {
+            nodeContext.cancelAndCleanupTransfersForPeer(null, "Node shutdown");
+            nodeContext.peerSymmetricKeys.clear();
+            nodeContext.myKeyPair = null;
+            System.out.println("[*] Cleared cryptographic keys.");
         }
-        // Stop network listener last, after other services signal they are stopping
-        if (networkManager != null) {
-            networkManager.stop(); // Stops listener thread and closes socket
-        }
-
-
-         // Clean up transfers explicitly on shutdown
-         if (nodeContext != null) {
-              nodeContext.cancelAndCleanupTransfersForPeer(null, "Node shutdown"); // Cancel all transfers
-         }
-
-         // Clear sensitive data
-         if (nodeContext != null) {
-             nodeContext.peerSymmetricKeys.clear();
-             nodeContext.myKeyPair = null;
-             System.out.println("[*] Cleared cryptographic keys.");
-         }
-
         System.out.println("[*] Node shutdown sequence complete.");
-        // Don't call System.exit() here; let the main thread finish naturally
-        // The shutdown hook ensures this runs even if the main thread is interrupted.
     }
-}
+
+    // --- Main Entry Point ---
+    public static void main(String[] args) {
+        // --- Server IP Configuration ---
+        String serverIpArg = null;
+        if (args.length > 0 && args[0] != null && !args[0].trim().isEmpty()) {
+            serverIpArg = args[0].trim();
+            System.out.println("[*] Using Server IP from command line: " + serverIpArg);
+        } else {
+            if (NodeConfig.SERVER_IP.equals("127.0.0.1")) {
+                System.out.println("[!] WARNING: Using default Server IP '127.0.0.1'. Pass the actual server IP as an argument if needed.");
+            } else {
+                System.out.println("[*] Using configured Server IP: " + NodeConfig.SERVER_IP);
+            }
+            serverIpArg = NodeConfig.SERVER_IP; // Use default/configured
+        }
+        final String serverIp = serverIpArg; // Final for use in Swing thread
+
+        // --- Backend Initialization (run sequentially before GUI) ---
+        nodeContext = new NodeContext();
+        nodeContext.currentState.set(NodeState.INITIALIZING);
+
+        // Add shutdown hook EARLY
+        Runtime.getRuntime().addShutdownHook(new Thread(P2PNode::shutdown));
+
+        // Perform critical initializations that must succeed
+        if (!resolveServerAddress(serverIp)) { System.exit(1); return; }
+        if (!initializeBackendServices()) { System.exit(1); return; }
+        if (!registrationService.generateKeys()) { System.exit(1); return; }
+        if (!networkManager.initializeSocket()) { System.exit(1); return; }
+
+        // --- Get Username via GUI Dialog ---
+        String username = promptForUsername();
+        if (username == null) { // User cancelled
+            System.out.println("[!] Username input cancelled. Exiting.");
+            System.exit(0); return;
+        }
+        nodeContext.myUsername = username;
+        System.out.println("[*] Username set to: " + nodeContext.myUsername);
+
+        // --- Launch GUI and Start Network Tasks ---
+        SwingUtilities.invokeLater(() -> {
+            // Create GUI instance
+            gui = new P2pChatGui(nodeContext, connectionService, chatService, fileTransferService);
+
+            // Set the GUI callback reference in backend services
+            // *** This assumes you have ADDED the setGuiCallback methods to the services ***
+            setGuiCallbackForAllServices(gui);
+
+            // --- Perform Network/Registration Tasks Off EDT ---
+            new Thread(() -> {
+                try {
+                    gui.appendMessage("System: Discovering local endpoints...");
+                    registrationService.discoverLocalEndpoints();
+
+                    gui.appendMessage("System: Network listener starting...");
+                    networkManager.startListening();
+                    gui.appendMessage("System: Network listener started.");
+
+                    gui.appendMessage("System: Registering with server...");
+                    if (!registrationService.registerWithServer()) {
+                        gui.appendMessage("System: [!!!] FAILED TO REGISTER WITH SERVER. Check server IP/status and restart.");
+                        // Update state to reflect failure if registration fails
+                        SwingUtilities.invokeLater(() -> gui.updateState(NodeState.DISCONNECTED, null, null));
+                        // Don't start background tasks if registration failed
+                    } else {
+                        // Registration successful, state will be updated via callback
+                        // Start background service tasks ONLY after successful registration attempt
+                        connectionService.start();
+                        fileTransferService.start();
+                        gui.appendMessage("System: Ready. Use 'Connect' button.");
+                    }
+                } catch (Exception e) {
+                    System.err.println("[!!!] Error during background initialization: " + e.getMessage());
+                    e.printStackTrace();
+                    SwingUtilities.invokeLater(() -> gui.appendMessage("System: [!!!] Critical error during startup. Please restart."));
+                    // Consider a more robust error handling/display mechanism
+                }
+            }, "Backend-Init-Thread").start();
+
+        });
+
+        // Main thread completes; application runs on EDT and backend threads
+        System.out.println("[*] Main thread finished launching GUI.");
+    }
+
+
+    // --- Helper Methods ---
+
+    private static boolean resolveServerAddress(String serverIp) {
+        System.out.println("[*] Resolving server address: " + serverIp + ":" + NodeConfig.SERVER_PORT + "...");
+        try {
+            nodeContext.serverAddress = new InetSocketAddress(InetAddress.getByName(serverIp), NodeConfig.SERVER_PORT);
+            System.out.println("[*] Server address resolved to: " + nodeContext.serverAddress);
+            return true;
+        } catch (UnknownHostException e) { System.err.println("[!!!] FATAL: Could not resolve server hostname: " + serverIp + " - " + e.getMessage()); return false;
+        } catch (SecurityException e) { System.err.println("[!!!] FATAL: Security Manager prevented resolving address: " + e.getMessage()); return false; }
+        catch (IllegalArgumentException e) { System.err.println("[!!!] FATAL: Invalid port number: " + NodeConfig.SERVER_PORT); return false;}
+    }
+
+    private static boolean initializeBackendServices() {
+        System.out.println("[*] Initializing backend services...");
+        try {
+            networkManager = new NetworkManager(nodeContext);
+            registrationService = new RegistrationService(nodeContext, networkManager);
+            chatService = new ChatService(nodeContext, networkManager);
+            connectionService = new ConnectionService(nodeContext, networkManager);
+            fileTransferService = new FileTransferService(nodeContext, networkManager);
+
+            // Initialize message handlers (these don't hold the callback directly in this design)
+            ServerMessageHandler serverMsgHandler = new ServerMessageHandler(nodeContext, connectionService, chatService);
+            PeerMessageHandler peerMsgHandler = new PeerMessageHandler(nodeContext, connectionService, chatService, fileTransferService, networkManager);
+            MessageHandler messageHandler = new MessageHandler(nodeContext, serverMsgHandler, peerMsgHandler, connectionService);
+
+            // Inject handler into NetworkManager
+            networkManager.setMessageHandler(messageHandler);
+
+            // Inject handlers into services that might need them (if any - current design avoids this)
+
+            System.out.println("[+] Backend services initialized.");
+            return true;
+        } catch(Exception e) {
+            System.err.println("[!!!] FATAL: Failed to initialize node services: " + e.getMessage());
+            e.printStackTrace(); return false;
+        }
+    }
+
+    // Helper to set the callback on all relevant services
+    // *** ASSUMES setGuiCallback(GuiCallback) methods exist in these classes ***
+    private static void setGuiCallbackForAllServices(GuiCallback callback) {
+        System.out.println("[*] Setting GUI callbacks for backend services...");
+        if (callback == null) {
+             System.err.println("[!] Error: Cannot set null GUI callback!");
+             return;
+        }
+        try {
+            // Call the setters you added to the service classes
+            connectionService.setGuiCallback(callback);
+            chatService.setGuiCallback(callback);
+            fileTransferService.setGuiCallback(callback);
+            registrationService.setGuiCallback(callback); // For displaying Node ID post-registration
+
+            // Also set callback for message handlers if they directly update GUI state
+            // This requires adding the method and potentially getters in MessageHandler
+            MessageHandler msgHandler = networkManager.getMessageHandler(); // Assume getter exists
+             if (msgHandler != null) {
+                 // Option 1: Handler holds callback (Requires adding setter to handlers)
+                 // msgHandler.getServerMessageHandler().setGuiCallback(callback);
+                 // msgHandler.getPeerMessageHandler().setGuiCallback(callback);
+
+                 // Option 2: Services handle ALL GUI updates (Preferred)
+                 // No need to set callback on handlers if services manage all GUI updates
+                 System.out.println("[*] Note: Assumes services handle all GUI updates via callbacks.");
+
+             } else {
+                 System.err.println("[!] Could not get MessageHandler to set callbacks.");
+             }
+             System.out.println("[+] GUI callbacks set.");
+
+        } catch (NullPointerException npe) {
+             System.err.println("[!!!] Error setting GUI callbacks: A service reference is null. Initialization failed.");
+             npe.printStackTrace();
+             // Handle this critical error, maybe exit?
+             JOptionPane.showMessageDialog(null, "Critical error during initialization.\nPlease restart.", "Fatal Error", JOptionPane.ERROR_MESSAGE);
+             System.exit(1);
+        } catch (Exception e) {
+             System.err.println("[!!!] Unexpected error setting GUI callbacks: " + e.getMessage());
+             e.printStackTrace();
+        }
+    }
+
+    // Helper to get username via dialog
+    private static String promptForUsername() {
+        System.out.println("[*] Prompting for username...");
+        String username = null;
+        while (username == null || username.trim().isEmpty()) {
+            username = JOptionPane.showInputDialog(null, // Parent component (null centers on screen)
+                    "Enter your desired username:", // Message
+                    "Username Required", // Title
+                    JOptionPane.PLAIN_MESSAGE); // Icon
+
+            if (username == null) { // User pressed Cancel or closed the dialog
+                return null; // Indicate cancellation
+            }
+            if (username.trim().isEmpty()) {
+                JOptionPane.showMessageDialog(null, "Username cannot be empty. Please try again.", "Invalid Input", JOptionPane.WARNING_MESSAGE);
+            }
+        }
+        return username.trim();
+    }
+
+} // End of P2PNode class
