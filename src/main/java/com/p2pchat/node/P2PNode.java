@@ -18,15 +18,13 @@ import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
-// Removed unused import: import java.util.stream.Collectors;
-
 
 public class P2PNode {
 
     // --- Configuration ---
     private static String SERVER_IP = "127.0.0.1";
     private static final int SERVER_PORT = 19999;
-    private static final int BUFFER_SIZE = 4096; // Ensure buffer can hold encrypted data + overhead
+    private static final int BUFFER_SIZE = 4096;
     private static final int LOCAL_UDP_PORT = 0;
     private static final long KEEPALIVE_SERVER_INTERVAL_MS = 20 * 1000;
     private static final long KEEPALIVE_PEER_INTERVAL_MS = 5 * 1000;
@@ -47,9 +45,9 @@ public class P2PNode {
     private static final AtomicReference<InetSocketAddress> peerAddrConfirmed = new AtomicReference<>(null);
     private static ChatHistoryManager chatHistoryManager = null;
 
-    // --- Cryptography State --- NEW
-    private static KeyPair myKeyPair = null; // Our own ECDH key pair
-    private static final ConcurrentHashMap<String, SecretKey> peerSymmetricKeys = new ConcurrentHashMap<>(); // Map PeerID -> Shared AES Key
+    // --- Cryptography State ---
+    private static KeyPair myKeyPair = null;
+    private static final ConcurrentHashMap<String, SecretKey> peerSymmetricKeys = new ConcurrentHashMap<>();
 
     private static DatagramSocket udpSocket;
     private static InetSocketAddress serverAddress;
@@ -62,21 +60,20 @@ public class P2PNode {
             t.setDaemon(true);
             return t;
         });
-    private static final AtomicBoolean connectionInfoReceived = new AtomicBoolean(false);
-    private static final AtomicBoolean p2pConnectionEstablished = new AtomicBoolean(false);
-    private static final AtomicBoolean sharedKeyEstablished = new AtomicBoolean(false); // <-- NEW flag for E2EE setup
+    private static final AtomicBoolean connectionInfoReceived = new AtomicBoolean(false); // Server sent peer info
+    private static final AtomicBoolean p2pUdpPathConfirmed = new AtomicBoolean(false);   // Ping/Pong worked
+    private static final AtomicBoolean sharedKeyEstablished = new AtomicBoolean(false); // Symmetric key derived
+
     private static final Object stateLock = new Object();
 
     // --- State Machine ---
-    // Added state for key exchange phase
-    private enum NodeState { DISCONNECTED, WAITING_MATCH, ATTEMPTING_UDP, EXCHANGING_KEYS, CONNECTED_SECURE } // <-- UPDATED States
+    private enum NodeState { DISCONNECTED, WAITING_MATCH, ATTEMPTING_UDP, EXCHANGING_KEYS, CONNECTED_SECURE }
     private static volatile NodeState currentState = NodeState.DISCONNECTED;
     private static long waitingSince = 0;
     private static int pingAttempts = 0;
     private static long lastStatePrintTime = 0;
 
     public static void main(String[] args) {
-        // Override Server IP if provided as command line argument
         if (args.length > 0 && args[0] != null && !args[0].trim().isEmpty()) {
             SERVER_IP = args[0].trim();
             System.out.println("[*] Using Server IP from command line: " + SERVER_IP);
@@ -91,19 +88,14 @@ public class P2PNode {
         Scanner inputScanner = new Scanner(System.in);
 
         try {
-            // --- Generate Key Pair --- NEW
             System.out.println("[*] Generating Elliptic Curve key pair...");
             try {
                 myKeyPair = CryptoUtils.generateECKeyPair();
                 System.out.println("[+] Key pair generated successfully.");
-                 // Optional: Print public key for debugging (remove in production)
-                 // System.out.println("    Public Key (Base64): " + CryptoUtils.encodePublicKey(myKeyPair.getPublic()));
             } catch (NoSuchAlgorithmException e) {
                 System.err.println("[!!!] FATAL: Failed to generate key pair. Cryptography provider not supported: " + e.getMessage());
-                return; // Cannot proceed without keys
+                return;
             }
-            // --- End Key Pair Generation ---
-
 
             System.out.println("[*] Resolving server address: " + SERVER_IP + ":" + SERVER_PORT + "...");
             serverAddress = new InetSocketAddress(InetAddress.getByName(SERVER_IP), SERVER_PORT);
@@ -114,10 +106,8 @@ public class P2PNode {
             int actualLocalPort = udpSocket.getLocalPort();
             System.out.println("[*] UDP Socket bound to local address: " + udpSocket.getLocalAddress().getHostAddress() + ":" + actualLocalPort);
 
-            // --- Prompt for Username ---
             System.out.print("[?] Enter your desired username: ");
             String inputName = "";
-             // Use loop similar to original code for robustness
             while(inputName == null || inputName.trim().isEmpty()) {
                 if (inputScanner.hasNextLine()) {
                     inputName = inputScanner.nextLine().trim();
@@ -133,7 +123,6 @@ public class P2PNode {
             myUsername = inputName;
             System.out.println("[*] Username set to: " + myUsername);
 
-            // Discover local endpoints
             myLocalEndpoints = getLocalNetworkEndpoints(actualLocalPort);
             System.out.println("[*] Discovered Local Endpoints:");
             if(myLocalEndpoints.isEmpty()) System.out.println("    <None found>");
@@ -142,13 +131,13 @@ public class P2PNode {
             Runtime.getRuntime().addShutdownHook(new Thread(P2PNode::shutdown));
             listenerExecutor.submit(P2PNode::udpListenerLoop);
 
-            // Register with Server - includes Public Key now
             if (!registerWithServer()) {
                 System.err.println("[!!!] Failed to register with server. Exiting.");
                 shutdown();
                 return;
             }
-            System.out.println("[+] Successfully registered with server. Node ID: " + myNodeId.substring(0,8) + "...");
+            // Show full ID on successful registration
+            System.out.println("[+] Successfully registered with server. Node ID: " + myNodeId);
 
             startConnectionManager();
             userInteractionLoop(inputScanner);
@@ -173,39 +162,26 @@ public class P2PNode {
     // --- Network Setup & Discovery (getLocalNetworkEndpoints remains unchanged) ---
      private static List<Endpoint> getLocalNetworkEndpoints(int udpPort) {
         List<Endpoint> endpoints = new ArrayList<>();
-        // System.out.println("[*] Discovering network interfaces..."); // Less noisy
         try {
             Enumeration<NetworkInterface> interfaces = NetworkInterface.getNetworkInterfaces();
             while (interfaces.hasMoreElements()) {
                 NetworkInterface ni = interfaces.nextElement();
                 try {
-                    // Skip loopback, virtual, P2P, and down interfaces.
-                    if (ni.isLoopback() || !ni.isUp() || ni.isVirtual() || ni.isPointToPoint()) {
-                        continue;
-                    }
-
+                    if (ni.isLoopback() || !ni.isUp() || ni.isVirtual() || ni.isPointToPoint()) continue;
                     Enumeration<InetAddress> addresses = ni.getInetAddresses();
                     while (addresses.hasMoreElements()) {
                         InetAddress addr = addresses.nextElement();
-                        // Skip link-local, multicast, wildcard, loopback any local address
-                        if (addr.isLinkLocalAddress() || addr.isLoopbackAddress() || addr.isAnyLocalAddress() || addr.isMulticastAddress()) {
-                            continue;
-                        }
-
+                        if (addr.isLinkLocalAddress() || addr.isLoopbackAddress() || addr.isAnyLocalAddress() || addr.isMulticastAddress()) continue;
                         String ip = addr.getHostAddress();
                         String type;
                         if (addr instanceof Inet6Address) {
                             int scopeIndex = ip.indexOf('%');
-                            if (scopeIndex > 0) {
-                                ip = ip.substring(0, scopeIndex);
-                            }
-                            if (ip.startsWith("::ffff:")) continue; // Skip IPv4 mapped
+                            if (scopeIndex > 0) ip = ip.substring(0, scopeIndex);
+                            if (ip.startsWith("::ffff:")) continue;
                             type = "local_v6";
                         } else if (addr instanceof Inet4Address) {
                             type = "local_v4";
-                        } else {
-                            continue;
-                        }
+                        } else continue;
                         endpoints.add(new Endpoint(ip, udpPort, type));
                     }
                 } catch (SocketException se) { /* Ignore interfaces that error */ }
@@ -213,11 +189,7 @@ public class P2PNode {
         } catch (SocketException e) {
             System.err.println("[!] Error getting network interfaces: " + e.getMessage());
         }
-
-        if (endpoints.isEmpty()) {
-            System.out.println("[!] No suitable local non-loopback IPs found. Will rely on public IP seen by server.");
-        }
-        // Deduplicate
+        if (endpoints.isEmpty()) System.out.println("[!] No suitable local non-loopback IPs found. Will rely on public IP seen by server.");
         return new ArrayList<>(new HashSet<>(endpoints));
     }
 
@@ -230,7 +202,7 @@ public class P2PNode {
         JSONObject registerMsg = new JSONObject();
         registerMsg.put("action", "register");
         registerMsg.put("username", myUsername);
-        registerMsg.put("public_key", CryptoUtils.encodePublicKey(myKeyPair.getPublic())); // <-- Send public key
+        registerMsg.put("public_key", CryptoUtils.encodePublicKey(myKeyPair.getPublic()));
         JSONArray localEndpointsJson = new JSONArray();
         myLocalEndpoints.forEach(ep -> localEndpointsJson.put(ep.toJson()));
         registerMsg.put("local_endpoints", localEndpointsJson);
@@ -242,7 +214,6 @@ public class P2PNode {
             return false;
         }
 
-        // Simple wait for registration confirmation (handled in listener)
         long startTime = System.currentTimeMillis();
         long timeout = 5000;
         while (myNodeId == null && System.currentTimeMillis() - startTime < timeout) {
@@ -270,14 +241,14 @@ public class P2PNode {
 
                 InetSocketAddress senderAddr = (InetSocketAddress) packet.getSocketAddress();
                 String messageStr = new String(packet.getData(), 0, packet.getLength(), StandardCharsets.UTF_8);
-                 if (messageStr.isEmpty()) continue; // Ignore empty
+                 if (messageStr.isEmpty()) continue;
 
                 JSONObject data;
                  try {
                      data = new JSONObject(messageStr);
                  } catch (org.json.JSONException e) {
-                     System.err.println("[Listener] Invalid JSON received from " + senderAddr + ". Content: " + messageStr.substring(0, Math.min(100, messageStr.length())) + "..."); // Log snippet
-                     continue; // Ignore malformed JSON
+                     System.err.println("[Listener] Invalid JSON received from " + senderAddr + ". Content snippet: " + messageStr.substring(0, Math.min(100, messageStr.length())) + "...");
+                     continue;
                  }
 
                 boolean fromServer = serverAddress != null && serverAddress.equals(senderAddr);
@@ -293,10 +264,10 @@ public class P2PNode {
             }
             catch (IOException e) {
                 if (running) System.err.println("[Listener Thread] I/O error receiving UDP packet: " + e.getMessage());
-            } catch (Exception e) { // Catch broader exceptions during handling
+            } catch (Exception e) {
                 if (running) {
                     System.err.println("[Listener Thread] Error processing UDP packet from " + ((packet!=null && packet.getSocketAddress()!=null)?packet.getSocketAddress():"unknown") + ": " + e.getClass().getName() + " - " + e.getMessage());
-                    e.printStackTrace(); // Log stack trace for unexpected errors
+                    e.printStackTrace();
                 }
             }
         }
@@ -318,17 +289,16 @@ public class P2PNode {
 
                 String currentTarget = targetPeerId.get();
                 InetSocketAddress confirmedPeer = peerAddrConfirmed.get();
-                NodeState stateNow = currentState; // Capture current state
+                NodeState stateNow = currentState;
 
-                // --- P2P Pinging / Hole Punching (Only during ATTEMPTING_UDP) ---
-                if (stateNow == NodeState.ATTEMPTING_UDP && currentTarget != null && !peerCandidates.isEmpty() && !p2pConnectionEstablished.get()) {
+                // --- P2P Pinging (Only during ATTEMPTING_UDP) ---
+                if (stateNow == NodeState.ATTEMPTING_UDP && currentTarget != null && !peerCandidates.isEmpty() && !p2pUdpPathConfirmed.get()) { // Check UDP path flag
                     if (pingAttempts < MAX_PING_ATTEMPTS) {
                         JSONObject pingMsg = new JSONObject();
                         pingMsg.put("action", "ping");
                         pingMsg.put("node_id", myNodeId);
 
                         List<Endpoint> currentCandidates = new ArrayList<>(peerCandidates);
-                        // Prioritize public endpoints
                         currentCandidates.sort(Comparator.comparing(ep -> (ep.type != null && ep.type.contains("public")) ? 0 : 1));
 
                         boolean sentPingThisRound = false;
@@ -336,9 +306,7 @@ public class P2PNode {
                             try {
                                 InetSocketAddress candidateAddr = new InetSocketAddress(InetAddress.getByName(candidate.ip), candidate.port);
                                 if(sendUdp(pingMsg, candidateAddr)) sentPingThisRound = true;
-                            } catch (UnknownHostException e) {
-                                // System.err.println("[Manager] Failed to resolve candidate address: " + candidate.ip); // Less noisy
-                            } catch(Exception e){ /* Ignore send errors during ping */ }
+                            } catch (Exception e){ /* Ignore send errors during ping */ }
                         }
                         if(sentPingThisRound) {
                             synchronized(stateLock) {
@@ -347,9 +315,8 @@ public class P2PNode {
                         }
                     }
                 }
-                // --- Peer Keep-Alive (if connected AND key established) ---
+                // --- Peer Keep-Alive (if securely connected) ---
                 else if (stateNow == NodeState.CONNECTED_SECURE && confirmedPeer != null) {
-                    // Send simple unencrypted keepalive for now. Could encrypt later if needed.
                     JSONObject keepAliveMsg = new JSONObject();
                     keepAliveMsg.put("action", "keepalive");
                     keepAliveMsg.put("node_id", myNodeId);
@@ -369,18 +336,17 @@ public class P2PNode {
      // Use the scanner passed from main
     private static void userInteractionLoop(Scanner scanner) {
         try {
-            System.out.println("\n--- P2P Node Ready (Username: " + myUsername + ", Node ID: " + myNodeId.substring(0,8) + "...) ---");
+            // Show full ID in initial ready message
+            System.out.println("\n--- P2P Node Ready (Username: " + myUsername + ", Node ID: " + myNodeId + ") ---");
             System.out.println("--- Enter 'connect <peer_id>', 'status', or 'quit' ---");
 
             while (running) {
                 try {
-                    // --- Check State Transitions ---
-                    checkStateTransitions();
+                    checkStateTransitions(); // Check async events first
 
-                    // --- Print Current State Periodically or Handle Input ---
                     long now = Instant.now().toEpochMilli();
                     String prompt = getPrompt();
-                    NodeState stateNow = currentState; // Capture state for this iteration
+                    NodeState stateNow = currentState;
 
                     // Periodic status/timeout checks for intermediate states
                     if (stateNow == NodeState.WAITING_MATCH || stateNow == NodeState.ATTEMPTING_UDP || stateNow == NodeState.EXCHANGING_KEYS) {
@@ -393,32 +359,31 @@ public class P2PNode {
                         // Check timeouts
                         if (stateNow == NodeState.WAITING_MATCH && (now - waitingSince > WAIT_MATCH_TIMEOUT_MS)) {
                             System.out.println("\n[!] Timed out waiting for peer match (" + WAIT_MATCH_TIMEOUT_MS / 1000 + "s). Cancelling.");
-                            resetConnectionState(); // Resets crypto state too
+                            resetConnectionState();
                             currentState = NodeState.DISCONNECTED;
-                            System.out.print(getPrompt()); // Reprint final prompt
+                            System.out.print(getPrompt());
                             continue;
                         }
-                        if (stateNow == NodeState.ATTEMPTING_UDP && (pingAttempts >= MAX_PING_ATTEMPTS) && !p2pConnectionEstablished.get()) {
+                        // Check PING timeout
+                        if (stateNow == NodeState.ATTEMPTING_UDP && (pingAttempts >= MAX_PING_ATTEMPTS) && !p2pUdpPathConfirmed.get()) {
                             System.out.println("\n[!] Failed to establish UDP connection with peer " + getPeerDisplayName() + " after " + MAX_PING_ATTEMPTS + " ping cycles.");
                             resetConnectionState();
                             currentState = NodeState.DISCONNECTED;
                              System.out.print(getPrompt());
                             continue;
                          }
-                          // Add timeout for key exchange? (e.g., if peer never sends PONG or message after UDP established)
-                          // This is implicitly handled now by lack of transition to CONNECTED_SECURE
+                         // Timeout for key exchange (implicitly if state doesn't advance)
 
                         // Sleep briefly if no input pending
                         if (System.in.available() <= 0) {
-                           try { Thread.sleep(200); } catch (InterruptedException e) { running = false; break; }
-                            continue; // Re-check state/timeouts
+                           try { Thread.sleep(200); } catch (InterruptedException e) { running = false; Thread.currentThread().interrupt(); break; }
+                            continue;
                         }
                     } else {
-                        // Not in an intermediate state, just print prompt
-                        System.out.print(prompt);
+                        System.out.print(prompt); // Print prompt normally for DISCONNECTED or CONNECTED_SECURE
                     }
 
-                    // --- Handle User Input ---
+                    // Handle User Input
                     if (!scanner.hasNextLine()) {
                         System.out.println("\n[*] Input stream closed. Exiting.");
                         running = false;
@@ -427,43 +392,34 @@ public class P2PNode {
                     String line = scanner.nextLine().trim();
                     if (line.isEmpty()) continue;
 
-                    // Re-check state *after* getting input, before processing command
-                    checkStateTransitions();
+                    checkStateTransitions(); // Check state again *after* input, before command processing
                     NodeState stateBeforeCommand = currentState;
 
                     String[] parts = line.split(" ", 2);
                     String command = parts[0].toLowerCase();
 
-                    // If state changed while user was typing, make them retry
                     if(stateBeforeCommand != currentState) {
                         System.out.println("\n[*] State changed during input, please check status and retry.");
                         continue;
                     }
 
+                    // Process commands
                     switch (command) {
                         case "quit":
                         case "exit":
                             System.out.println("[*] Quit command received. Initiating shutdown...");
                             shutdown();
                             System.exit(0);
-                            break; // Unreachable
+                            break;
                         case "connect":
                             if (stateBeforeCommand == NodeState.DISCONNECTED) {
                                 if (parts.length > 1 && !parts[1].isEmpty()) {
                                     String peerToConnect = parts[1].trim();
-                                    if(peerToConnect.equals(myNodeId)){
-                                        System.out.println("[!] Cannot connect to yourself.");
-                                    } else if (peerToConnect.length() < 5) {
-                                        System.out.println("[!] Invalid Peer ID format.");
-                                    } else {
-                                        startConnectionAttempt(peerToConnect);
-                                    }
-                                } else {
-                                    System.out.println("[!] Usage: connect <peer_node_id>");
-                                }
-                            } else {
-                                System.out.println("[!] Already connecting or connected. Disconnect first ('disconnect').");
-                            }
+                                    if(peerToConnect.equals(myNodeId)) System.out.println("[!] Cannot connect to yourself.");
+                                    else if (peerToConnect.length() < 10) System.out.println("[!] Invalid Peer ID format."); // Basic check
+                                    else startConnectionAttempt(peerToConnect);
+                                } else System.out.println("[!] Usage: connect <peer_node_id>");
+                            } else System.out.println("[!] Already connecting or connected. Disconnect first ('disconnect').");
                             break;
                         case "disconnect":
                         case "cancel":
@@ -471,40 +427,28 @@ public class P2PNode {
                                 System.out.println("[*] Disconnecting/Cancelling connection with " + getPeerDisplayName() + "...");
                                 resetConnectionState();
                                 currentState = NodeState.DISCONNECTED;
-                            } else {
-                                System.out.println("[!] Not currently connected or attempting connection.");
-                            }
+                            } else System.out.println("[!] Not currently connected or attempting connection.");
                             break;
                         case "chat":
-                        case "c": // Alias for chat
-                            if (stateBeforeCommand == NodeState.CONNECTED_SECURE) { // Only allow chat when securely connected
-                                if (parts.length > 1 && !parts[1].isEmpty()) {
-                                    sendMessageToPeer(parts[1]); // Sends encrypted message now
-                                } else {
-                                    System.out.println("[!] Usage: chat <message>");
-                                }
+                        case "c":
+                            if (stateBeforeCommand == NodeState.CONNECTED_SECURE) {
+                                if (parts.length > 1 && !parts[1].isEmpty()) sendMessageToPeer(parts[1]);
+                                else System.out.println("[!] Usage: chat <message>");
                             } else if (stateBeforeCommand == NodeState.EXCHANGING_KEYS || stateBeforeCommand == NodeState.ATTEMPTING_UDP) {
                                  System.out.println("[!] Waiting for secure connection to be established...");
-                            }
-                            else {
-                                System.out.println("[!] Not connected to a peer. Use 'connect <peer_id>' first.");
-                            }
+                            } else System.out.println("[!] Not connected to a peer. Use 'connect <peer_id>' first.");
                             break;
                         case "status":
-                        case "s": // Alias
+                        case "s":
                             System.out.println(getStateDescription());
                             break;
                         case "id":
                             System.out.println("[*] Your Username: " + myUsername);
-                            System.out.println("[*] Your Node ID: " + myNodeId);
+                            System.out.println("[*] Your Node ID: " + myNodeId); // Always show full ID here
                             break;
                         default:
-                             // Provide specific help when connected securely
-                             if(stateBeforeCommand == NodeState.CONNECTED_SECURE) {
-                                 System.out.println("[!] Unknown command. Available: chat, disconnect, status, quit");
-                             } else {
-                                 System.out.println("[!] Unknown command. Available: connect, status, id, quit");
-                             }
+                             if(stateBeforeCommand == NodeState.CONNECTED_SECURE) System.out.println("[!] Unknown command. Available: chat, disconnect, status, quit");
+                             else System.out.println("[!] Unknown command. Available: connect, status, id, quit");
                             break;
                     }
                 }
@@ -516,7 +460,7 @@ public class P2PNode {
                     e.printStackTrace();
                     try { Thread.sleep(500); } catch (InterruptedException ignored) {}
                 }
-            }
+            } // End while(running)
         } finally {
              // Avoid closing System.in scanner
         }
@@ -528,127 +472,154 @@ public class P2PNode {
 
     private static void checkStateTransitions() {
         NodeState previousState = currentState;
-        String peerId = connectedPeerId.get(); // Get potentially connected peer
+        String peerId = connectedPeerId.get();
 
         synchronized (stateLock) {
-            // Event: Received connection info from server
+            // Event: Received connection info from server (triggers key gen + sets flag)
             if (currentState == NodeState.WAITING_MATCH && connectionInfoReceived.compareAndSet(true, false)) {
-                if (!peerCandidates.isEmpty()) {
-                    currentState = NodeState.ATTEMPTING_UDP;
-                    pingAttempts = 0; // Reset ping counter
-                    System.out.println("\n[*] Received peer info for " + getPeerDisplayName() +". Attempting UDP P2P connection...");
-                } else {
-                    System.out.println("\n[!] Received connection info response, but peer candidate list was empty. Cancelling.");
-                    resetConnectionState();
-                    currentState = NodeState.DISCONNECTED;
-                }
-            }
-            // Event: UDP path established (ping/pong worked)
-            else if (currentState == NodeState.ATTEMPTING_UDP && p2pConnectionEstablished.get()) {
-                 // Now we need to establish the shared key
-                 currentState = NodeState.EXCHANGING_KEYS; // Move to key exchange state
-                 System.out.println("\n[*] UDP Path established. Attempting secure key exchange with " + getPeerDisplayName() + "...");
-                 // Key exchange initiated by handleServerMessage storing peer public key
-                 // and then generateSharedKeyAndStore being called.
-                 // We might need to trigger sending a PONG again here to ensure peer has our address if they PINGed first.
-                 InetSocketAddress confirmedAddr = peerAddrConfirmed.get();
-                 if(confirmedAddr != null) {
-                    JSONObject pongMsg = new JSONObject();
-                    pongMsg.put("action", "pong");
-                    pongMsg.put("node_id", myNodeId);
-                    sendUdp(pongMsg, confirmedAddr); // Send initial PONG to confirm path both ways maybe
+                 // We generated the key in handleServerMessage. Now check if successful.
+                 if (sharedKeyEstablished.get() && !peerCandidates.isEmpty()) { // Check key AND candidates
+                     currentState = NodeState.ATTEMPTING_UDP;
+                     pingAttempts = 0; // Reset ping counter
+                     // Show full target ID here
+                     System.out.println("\n[*] Received peer info for " + targetPeerId.get() +". Attempting UDP P2P connection...");
+                 } else {
+                     // Key gen failed or candidates missing
+                     System.out.println("\n[!] Failed to process peer info (missing candidates or key error). Cancelling.");
+                     resetConnectionState();
+                     currentState = NodeState.DISCONNECTED;
                  }
             }
-            // Event: Shared symmetric key established
-            else if (currentState == NodeState.EXCHANGING_KEYS && sharedKeyEstablished.get()) {
-                 currentState = NodeState.CONNECTED_SECURE;
+            // Event: UDP path established (ping/pong worked)
+            // This flag (p2pUdpPathConfirmed) is set by handlePeerMessage upon receiving ping/pong
+            else if (currentState == NodeState.ATTEMPTING_UDP && p2pUdpPathConfirmed.get()) {
+                 // We already generated the key upon receiving server info.
+                 // If UDP path is now confirmed AND key is established, move to secure state.
+                 if (sharedKeyEstablished.get()) {
+                    currentState = NodeState.CONNECTED_SECURE; // Directly to secure state
+                    InetSocketAddress confirmedAddr = peerAddrConfirmed.get();
+                    System.out.println("\n-----------------------------------------------------");
+                    System.out.println("[+] SECURE E2EE CONNECTION ESTABLISHED with " + getPeerDisplayName() + "!");
+                    System.out.println("    Using path: YOU -> " + (confirmedAddr != null ? confirmedAddr : "???"));
+                    System.out.println("-----------------------------------------------------");
+
+                    if (peerId != null) {
+                        chatHistoryManager = new ChatHistoryManager();
+                        chatHistoryManager.initialize(myNodeId, peerId, connectedPeerUsername.get());
+                    } else {
+                        System.err.println("[!] Cannot initialize history: Peer Node ID is null upon secure connection!");
+                        chatHistoryManager = null;
+                    }
+                    targetPeerId.set(null);
+                    connectionInfoReceived.set(false); // Reset this flag too
+                    peerCandidates.clear();
+                    pingAttempts = 0;
+                 } else {
+                     // UDP path ok, but key exchange failed earlier or is pending? Unlikely state.
+                     // Move to intermediate state just in case.
+                     currentState = NodeState.EXCHANGING_KEYS;
+                     System.out.println("\n[*] UDP Path established, but waiting for or failed key exchange with " + getPeerDisplayName() + "...");
+                 }
+            }
+             // Event: If somehow UDP path confirmed AFTER key established (maybe pong received late)
+            else if (currentState == NodeState.EXCHANGING_KEYS && p2pUdpPathConfirmed.get() && sharedKeyEstablished.get()){
+                 // This path might handle the race condition observed before
+                 currentState = NodeState.CONNECTED_SECURE; // Move to secure state
                  InetSocketAddress confirmedAddr = peerAddrConfirmed.get();
                  System.out.println("\n-----------------------------------------------------");
                  System.out.println("[+] SECURE E2EE CONNECTION ESTABLISHED with " + getPeerDisplayName() + "!");
                  System.out.println("    Using path: YOU -> " + (confirmedAddr != null ? confirmedAddr : "???"));
                  System.out.println("-----------------------------------------------------");
-
-                 // Initialize History Manager (only once fully connected)
                  if (peerId != null) {
                      chatHistoryManager = new ChatHistoryManager();
-                     chatHistoryManager.initialize(myNodeId, peerId, connectedPeerUsername.get()); // Pass peer details
+                     chatHistoryManager.initialize(myNodeId, peerId, connectedPeerUsername.get());
                  } else {
-                     System.err.println("[!] Cannot initialize history: Peer Node ID is null upon connection!");
+                     System.err.println("[!] Cannot initialize history: Peer Node ID is null upon secure connection!");
                      chatHistoryManager = null;
                  }
-                 targetPeerId.set(null); // Clear the target
+                 targetPeerId.set(null);
                  connectionInfoReceived.set(false);
                  peerCandidates.clear();
                  pingAttempts = 0;
             }
-            // Event: Connection lost (UDP or crypto state becomes invalid)
-            else if ((currentState == NodeState.CONNECTED_SECURE || currentState == NodeState.EXCHANGING_KEYS || currentState == NodeState.ATTEMPTING_UDP) && (!p2pConnectionEstablished.get() || (currentState == NodeState.CONNECTED_SECURE && !sharedKeyEstablished.get())) ) {
-                 System.out.println("\n[*] Connection with " + getPeerDisplayName() + " lost or became insecure.");
+
+            // Event: Connection lost (UDP path lost OR shared key lost AFTER connection)
+            // Check UDP path loss primarily for intermediate states, key loss for secure state
+            else if ( (currentState == NodeState.ATTEMPTING_UDP || currentState == NodeState.EXCHANGING_KEYS) && !p2pUdpPathConfirmed.get() && peerAddrConfirmed.get() != null) {
+                 // If we had confirmed an address but lost UDP path during setup
+                 System.out.println("\n[*] UDP connection with " + getPeerDisplayName() + " lost during setup.");
+                 resetConnectionState();
+                 currentState = NodeState.DISCONNECTED;
+            } else if ( currentState == NodeState.CONNECTED_SECURE && (!p2pUdpPathConfirmed.get() || !sharedKeyEstablished.get()) ) {
+                 // If secure connection established, but UDP path flag resets OR key flag resets (shouldn't happen unless explicit disconnect)
+                 // OR if we receive an error indicating loss (e.g. Port Unreachable - TODO: Signal this)
+                 System.out.println("\n[*] Secure connection with " + getPeerDisplayName() + " lost or became insecure.");
                  resetConnectionState();
                  currentState = NodeState.DISCONNECTED;
             }
+             // Add cleanup for EXCHANGING_KEYS if UDP path confirmed but key is NOT established after a while? Low priority.
+
         } // End synchronized block
 
         if (currentState != previousState) {
             System.out.println("[State Change] " + previousState + " -> " + currentState);
-            lastStatePrintTime = 0; // Reset print timer on state change
-            // Print prompt again if state changed non-interactively
-            System.out.print(getPrompt());
+            lastStatePrintTime = 0;
+            // Avoid printing prompt if state changed non-interactively to prevent duplicates
+            // System.out.print(getPrompt()); // REMOVE this, let main loop handle prompt
         }
     }
 
      /** Gets a description of the current node state. */
     private static String getStateDescription() {
+        String fullPeerId = connectedPeerId.get(); // Try connected first
+        if (fullPeerId == null) fullPeerId = targetPeerId.get(); // Fallback to target
+        String peerDisplay = getPeerDisplayName(); // Use helper for username/short ID
+
         switch (currentState) {
-            case DISCONNECTED: return "[Status] Disconnected. Your Node ID: " + (myNodeId != null ? myNodeId.substring(0,8) + "..." : "N/A") + " | Username: " + myUsername;
+            // Show full Node ID in disconnected state description
+            case DISCONNECTED: return "[Status] Disconnected. Your Node ID: " + myNodeId + " | Username: " + myUsername;
             case WAITING_MATCH:
                 long elapsed = (System.currentTimeMillis() - waitingSince) / 1000;
-                return "[Status] Request sent. Waiting for peer " + getPeerDisplayName() + " (" + elapsed + "s / " + WAIT_MATCH_TIMEOUT_MS/1000 + "s)";
+                // Show full Peer ID in status message
+                return "[Status] Request sent. Waiting for peer " + (fullPeerId != null ? fullPeerId : peerDisplay) + " (" + elapsed + "s / " + WAIT_MATCH_TIMEOUT_MS/1000 + "s)";
             case ATTEMPTING_UDP:
-                return "[Status] Attempting UDP P2P connection to " + getPeerDisplayName() + " (Ping cycle: " + pingAttempts + "/" + MAX_PING_ATTEMPTS + ")";
+                // Show full Peer ID in status message
+                return "[Status] Attempting UDP P2P connection to " + (fullPeerId != null ? fullPeerId : peerDisplay) + " (Ping cycle: " + pingAttempts + "/" + MAX_PING_ATTEMPTS + ")";
             case EXCHANGING_KEYS:
-                 return "[Status] UDP path OK. Establishing secure E2EE session with " + getPeerDisplayName() + "...";
+                 // Show peer username/short ID is fine here
+                 return "[Status] UDP path OK. Establishing secure E2EE session with " + peerDisplay + "...";
             case CONNECTED_SECURE:
                 InetSocketAddress addr = peerAddrConfirmed.get();
-                 // Add lock icon for secure state
-                return "[Status] 🔒 E2EE Connected to " + getPeerDisplayName() + " (" + (addr != null ? addr : "???") + ")";
+                 // Show peer username/short ID is fine here
+                return "[Status] 🔒 E2EE Connected to " + peerDisplay + " (" + (addr != null ? addr : "???") + ")";
             default: return "[Status] Unknown State";
         }
     }
 
     /** Gets the appropriate command prompt based on the current state. */
     private static String getPrompt() {
-        String peerName = getPeerDisplayName();
+        String peerName = getPeerDisplayName(); // Use helper (Username > Short ID)
         switch (currentState) {
             case DISCONNECTED: return "[?] Enter 'connect <peer_id>', 'status', 'id', 'quit': ";
+            // Use Username/Short ID for prompt brevity
             case WAITING_MATCH: return "[Waiting:" + peerName + " ('cancel'/'disconnect')] ";
             case ATTEMPTING_UDP: return "[Pinging:" + peerName + " ('cancel'/'disconnect')] ";
             case EXCHANGING_KEYS: return "[Securing:" + peerName + " ('cancel'/'disconnect')] ";
-            case CONNECTED_SECURE: return "[Chat 🔒 " + peerName + "] ('chat <msg>', 'disconnect', 'status', 'quit'): "; // Add lock icon
+            case CONNECTED_SECURE: return "[Chat 🔒 " + peerName + "] ('chat <msg>', 'disconnect', 'status', 'quit'): ";
             default: return "> ";
         }
     }
 
-    /** Gets the display name for the peer (Username or ID prefix). */
+    /** Gets the display name for the peer (Username or ID prefix). Stays the same. */
     private static String getPeerDisplayName() {
-        // Prioritize connected peer info
         String peerId = connectedPeerId.get();
         String username = connectedPeerUsername.get();
-        if (peerId != null) { // If we have a confirmed connected peer
-            if (username != null && !username.isEmpty()) {
-                return username; // Use username if available
-            }
-            // Fallback to ID prefix if username not set for connected peer
+        if (peerId != null) {
+            if (username != null && !username.isEmpty()) return username;
             return peerId.substring(0, Math.min(8, peerId.length())) + "...";
         }
-
-        // If not connected, use target peer info if available
         String targetId = targetPeerId.get();
-        if (targetId != null) {
-            return targetId.substring(0, Math.min(8, targetId.length())) + "...";
-        }
-
-        // Default fallback
+        if (targetId != null) return targetId.substring(0, Math.min(8, targetId.length())) + "...";
         return "???";
     }
 
@@ -657,23 +628,21 @@ public class P2PNode {
     private static void startConnectionAttempt(String peerToConnect) {
         synchronized (stateLock) {
             if (currentState != NodeState.DISCONNECTED) {
-                System.out.println("[!] Cannot start new connection attempt while in state: " + currentState);
-                return;
+                System.out.println("[!] Cannot start new connection attempt while in state: " + currentState); return;
             }
              if (myKeyPair == null) {
-                System.err.println("[!] Cannot start connection: KeyPair missing.");
-                return;
+                System.err.println("[!] Cannot start connection: KeyPair missing."); return;
             }
-            System.out.println("[*] Requesting connection info for peer: " + peerToConnect.substring(0, Math.min(8, peerToConnect.length())) + "...");
-            resetConnectionState(); // Ensure clean state
+            // Show full peer ID when starting connection
+            System.out.println("[*] Requesting connection info for peer: " + peerToConnect);
+            resetConnectionState();
 
-            targetPeerId.set(peerToConnect); // Set who we want to connect to
+            targetPeerId.set(peerToConnect);
 
             JSONObject requestMsg = new JSONObject();
             requestMsg.put("action", "request_connection");
             requestMsg.put("node_id", myNodeId);
             requestMsg.put("target_id", peerToConnect);
-            // No need to send public key here, server already has it from registration
             boolean sent = sendUdp(requestMsg, serverAddress);
 
             if (sent) {
@@ -682,7 +651,7 @@ public class P2PNode {
                 lastStatePrintTime = 0;
             } else {
                  System.err.println("[!] Failed to send connection request to server.");
-                 targetPeerId.set(null); // Reset target if send failed
+                 targetPeerId.set(null);
             }
         }
     }
@@ -691,9 +660,12 @@ public class P2PNode {
     private static void resetConnectionState() {
         synchronized (stateLock) {
             String peerId = connectedPeerId.get();
+            if(peerId == null) peerId = targetPeerId.get(); // Check target too
+
             if(peerId != null) {
-                 peerSymmetricKeys.remove(peerId); // <-- Remove session key
-                 System.out.println("[*] Cleared session key for peer " + peerId.substring(0,8) + "...");
+                 peerSymmetricKeys.remove(peerId);
+                 // Show full ID when clearing key
+                 System.out.println("[*] Cleared session key for peer " + peerId);
             }
 
             targetPeerId.set(null);
@@ -702,12 +674,11 @@ public class P2PNode {
             peerCandidates.clear();
             peerAddrConfirmed.set(null);
             connectionInfoReceived.set(false);
-            p2pConnectionEstablished.set(false);
-            sharedKeyEstablished.set(false); // <-- Reset crypto flag
+            p2pUdpPathConfirmed.set(false); // Reset UDP flag
+            sharedKeyEstablished.set(false);
             pingAttempts = 0;
             waitingSince = 0;
 
-            // Reset history manager only if it was initialized
             if (chatHistoryManager != null) {
                 System.out.println("[*] Chat history logging stopped.");
                 chatHistoryManager = null;
@@ -724,21 +695,17 @@ public class P2PNode {
         String status = data.optString("status", null);
         String action = data.optString("action", null);
 
-        // --- Registration Reply ---
         if ("registered".equals(status) && myNodeId == null) {
             String receivedNodeId = data.optString("node_id");
             if (receivedNodeId != null && !receivedNodeId.isEmpty()) {
-                myNodeId = receivedNodeId;
+                myNodeId = receivedNodeId; // Store full ID
                 JSONObject publicEpJson = data.optJSONObject("your_public_endpoint");
                 if(publicEpJson != null) {
                     myPublicEndpointSeen = Endpoint.fromJson(publicEpJson);
                      System.out.println("[*] Server recorded public endpoint: " + myPublicEndpointSeen);
                 }
-            } else {
-                 System.err.println("[!] Received 'registered' status from server but missing 'node_id'.");
-            }
+            } else System.err.println("[!] Received 'registered' status from server but missing 'node_id'.");
         }
-        // --- Connection Info Reply ---
         else if ("connection_info".equals(action) && "match_found".equals(status)) {
             String receivedPeerId = data.optString("peer_id");
             String currentTarget = targetPeerId.get();
@@ -746,9 +713,8 @@ public class P2PNode {
             if (currentTarget != null && currentTarget.equals(receivedPeerId)) {
                 JSONArray candidatesJson = data.optJSONArray("peer_endpoints");
                 String peerUsername = data.optString("peer_username", null);
-                String peerPublicKeyBase64 = data.optString("peer_public_key", null); // <-- Get peer public key
+                String peerPublicKeyBase64 = data.optString("peer_public_key", null);
 
-                 // Validate essential info
                  if (candidatesJson == null || peerPublicKeyBase64 == null || peerPublicKeyBase64.isEmpty()) {
                      System.err.println("[!] Received incomplete 'connection_info' from server (missing endpoints or public key). Cancelling.");
                      resetConnectionState();
@@ -756,65 +722,53 @@ public class P2PNode {
                      return;
                  }
 
-
-                synchronized(stateLock) { // Protect access to shared state
+                synchronized(stateLock) {
                     if(currentState != NodeState.WAITING_MATCH) {
                          System.out.println("[?] Received connection_info while not in WAITING_MATCH state. Ignoring.");
-                         return; // Avoid processing if state already advanced or changed
+                         return;
                     }
 
-                    // --- Generate Shared Key --- NEW ---
+                    // Generate Shared Key FIRST
                     boolean keyGenSuccess = generateSharedKeyAndStore(receivedPeerId, peerPublicKeyBase64);
                     if (!keyGenSuccess) {
-                         System.err.println("[!] Failed to establish shared secret with peer " + receivedPeerId.substring(0,8) + ". Cancelling connection.");
+                         // Show full peer ID on failure
+                         System.err.println("[!] Failed to establish shared secret with peer " + receivedPeerId + ". Cancelling connection.");
                          resetConnectionState();
                          currentState = NodeState.DISCONNECTED;
-                         return; // Cannot proceed without shared key
+                         return;
                     }
-                     // --- End Generate Shared Key ---
 
                     // Store peer username
-                    if (peerUsername != null && !peerUsername.isEmpty()) {
-                        connectedPeerUsername.set(peerUsername);
-                        System.out.println("[*] Received Peer Username: " + peerUsername);
-                    } else {
-                        connectedPeerUsername.set(null); // Clear if not received
-                        System.out.println("[!] Peer username not provided by server.");
-                    }
+                    if (peerUsername != null && !peerUsername.isEmpty()) connectedPeerUsername.set(peerUsername);
+                    else { connectedPeerUsername.set(null); System.out.println("[!] Peer username not provided by server."); }
+                    System.out.println("[*] Received Peer Username: " + connectedPeerUsername.get());
 
                     // Store peer candidates
                     peerCandidates.clear();
-                    System.out.println("[*] Received Peer Candidates from server for " + receivedPeerId.substring(0,8) + "...:");
+                    // Show full peer ID here
+                    System.out.println("[*] Received Peer Candidates from server for " + receivedPeerId + ":");
                     int validCandidates = 0;
                     for (int i = 0; i < candidatesJson.length(); i++) {
                         JSONObject epJson = candidatesJson.optJSONObject(i);
                         if (epJson != null) {
                             Endpoint ep = Endpoint.fromJson(epJson);
-                            if (ep != null) {
-                                peerCandidates.add(ep);
-                                System.out.println("    - " + ep);
-                                validCandidates++;
-                            }
+                            if (ep != null) { peerCandidates.add(ep); System.out.println("    - " + ep); validCandidates++; }
                         }
                     }
-                    if (validCandidates > 0) {
-                        connectionInfoReceived.set(true); // Signal that valid info WAS received
-                    } else {
-                        System.out.println("[!] Received empty or invalid candidate list for peer " + receivedPeerId.substring(0,8) + "...");
-                        resetConnectionState(); // Cannot proceed without candidates
+                    if (validCandidates > 0) connectionInfoReceived.set(true); // Signal OK
+                    else {
+                        // Show full peer ID here
+                        System.out.println("[!] Received empty or invalid candidate list for peer " + receivedPeerId + "...");
+                        resetConnectionState();
                         currentState = NodeState.DISCONNECTED;
                     }
                 } // End synchronized block
-            } else {
-                System.out.println("[?] Received connection_info for unexpected peer " + receivedPeerId + " while targeting " + currentTarget + ". Ignoring.");
-            }
+            } else System.out.println("[?] Received connection_info for unexpected peer " + receivedPeerId + ". Ignoring.");
         }
-         // --- Server Error Messages ---
          else if ("error".equals(status)) {
             String message = data.optString("message", "Unknown error");
             System.err.println("\n[!] Server Error: " + message);
             synchronized(stateLock) {
-                 // Reset connection attempt if error occurs during sensitive phases
                 if (currentState == NodeState.WAITING_MATCH || currentState == NodeState.ATTEMPTING_UDP || currentState == NodeState.EXCHANGING_KEYS) {
                     System.out.println("    Cancelling connection attempt due to server error.");
                     resetConnectionState();
@@ -822,10 +776,10 @@ public class P2PNode {
                 }
             }
          }
-         // --- Acknowledgment of Connection Request ---
          else if ("connection_request_received".equals(status) && "ack".equals(action)) {
              String waitingFor = data.optString("waiting_for", "?");
              if (currentState == NodeState.WAITING_MATCH && waitingFor.equals(targetPeerId.get())) {
+                 // Show username/short ID is fine here
                  System.out.println("[*] Server acknowledged request. Waiting for peer " + getPeerDisplayName() + " to connect.");
              }
          }
@@ -836,39 +790,34 @@ public class P2PNode {
         String action = data.optString("action", null);
         String senderId = data.optString("node_id", null);
 
-        if (senderId == null || action == null) {
-            System.out.println("[?] Received invalid message (no action/node_id) from " + peerAddr);
-            return;
-        }
+        if (senderId == null || action == null) return; // Ignore invalid
 
         String currentTarget = targetPeerId.get();
         String currentPeer = connectedPeerId.get();
-        NodeState stateNow = currentState; // Capture current state
+        NodeState stateNow = currentState;
 
-        // --- Processing During UDP Connection Attempt (ATTEMPTING_UDP state) ---
+        // --- Processing During UDP Connection Attempt ---
         if (stateNow == NodeState.ATTEMPTING_UDP && currentTarget != null && currentTarget.equals(senderId)) {
              boolean senderIsCandidate = peerCandidates.stream().anyMatch(cand -> {
                  try { return new InetSocketAddress(InetAddress.getByName(cand.ip), cand.port).equals(peerAddr); }
                  catch (UnknownHostException e) { return false; }
              });
 
-            // Only process ping/pong from candidate addresses during this phase
             if (senderIsCandidate && (action.equals("ping") || action.equals("pong"))) {
                  synchronized(stateLock) {
-                     if (currentState != NodeState.ATTEMPTING_UDP) return; // Re-check state inside lock
+                     if (currentState != NodeState.ATTEMPTING_UDP) return; // Re-check
 
                      if (peerAddrConfirmed.compareAndSet(null, peerAddr)) {
-                         System.out.println("\n[*] CONFIRMED receiving directly from Peer " + senderId.substring(0,8) + "... at " + peerAddr + "!");
-                         connectedPeerId.set(senderId); // Set the connected peer ID now
+                         // Show full sender ID on confirmation
+                         System.out.println("\n[*] CONFIRMED receiving directly from Peer " + senderId + " at " + peerAddr + "!");
+                         connectedPeerId.set(senderId);
                      }
 
-                     // If we get a PING or PONG, it means UDP path is likely working
-                     if (p2pConnectionEstablished.compareAndSet(false, true)) {
+                     if (p2pUdpPathConfirmed.compareAndSet(false, true)) { // Set UDP path flag
                           System.out.println("[+] P2P UDP Path Confirmed (Received " + action.toUpperCase() + ")!");
-                          // State transition to EXCHANGING_KEYS happens in main loop check
+                          // State transition happens in main loop check
                      }
 
-                     // Respond to PING with PONG
                      if ("ping".equals(action)) {
                          JSONObject pongMsg = new JSONObject();
                          pongMsg.put("action", "pong");
@@ -876,40 +825,36 @@ public class P2PNode {
                          sendUdp(pongMsg, peerAddr);
                      }
                  } // End synchronized block
-            } // else: Ignore non-ping/pong or messages from non-candidate addresses during UDP attempt
+            }
         }
-        // --- Processing During Key Exchange (EXCHANGING_KEYS state) ---
+        // --- Processing During Key Exchange ---
         else if (stateNow == NodeState.EXCHANGING_KEYS && currentPeer != null && currentPeer.equals(senderId)) {
-            // We might receive PING/PONG here too as paths stabilize
-            InetSocketAddress confirmedAddr = peerAddrConfirmed.get();
-            if (confirmedAddr != null && peerAddr.equals(confirmedAddr)) {
+             InetSocketAddress confirmedAddr = peerAddrConfirmed.get();
+             if (confirmedAddr != null && peerAddr.equals(confirmedAddr)) {
+                 // Still respond to pings/pongs to keep path alive
                  if ("ping".equals(action)) {
                     JSONObject pongMsg = new JSONObject();
                     pongMsg.put("action", "pong");
                     pongMsg.put("node_id", myNodeId);
                     sendUdp(pongMsg, peerAddr);
                  }
-                 // If shared key is already established (e.g. race condition), ignore further pongs
-                 if ("pong".equals(action) && !sharedKeyEstablished.get()) {
-                     // Receiving pong confirms bidirectional UDP path - now fully ready for secure state
-                     // The sharedKeyEstablished flag is set when *we* compute the key after receiving server info.
-                     // So receiving pong here just reinforces the path is good.
-                     System.out.println("[*] Received PONG during key exchange phase from " + getPeerDisplayName() + ".");
+                 if ("pong".equals(action)) {
+                     // Receiving pong reinforces path is good, set flag if not already set
+                     if (p2pUdpPathConfirmed.compareAndSet(false, true)) {
+                         System.out.println("[+] P2P UDP Path Confirmed (Received PONG during key exchange)!");
+                     }
                  }
-                 // Ignore chat messages during key exchange
-            }
+             }
         }
-        // --- Processing After Secure Connection Established (CONNECTED_SECURE state) ---
+        // --- Processing After Secure Connection Established ---
         else if (stateNow == NodeState.CONNECTED_SECURE && currentPeer != null && currentPeer.equals(senderId)) {
             InetSocketAddress confirmedAddr = peerAddrConfirmed.get();
-            SecretKey sharedKey = peerSymmetricKeys.get(currentPeer); // Get the key for this peer
+            SecretKey sharedKey = peerSymmetricKeys.get(currentPeer);
 
-            // SECURITY: Only accept messages from the confirmed peer address
             if (confirmedAddr == null || !peerAddr.equals(confirmedAddr)) {
-                System.out.println("[?] WARNING: Received message from connected peer " + getPeerDisplayName() + " but from wrong address " + peerAddr + " (expected " + confirmedAddr + "). IGNORING.");
+                System.out.println("[?] WARNING: Received message from connected peer " + getPeerDisplayName() + " but from wrong address " + peerAddr + ". IGNORING.");
                 return;
             }
-             // SECURITY: Ensure we have a shared key for this peer
             if (sharedKey == null) {
                  System.err.println("[!] CRITICAL: No shared key found for connected peer " + getPeerDisplayName() + ". Disconnecting.");
                  resetConnectionState();
@@ -917,10 +862,8 @@ public class P2PNode {
                  return;
             }
 
-
             switch (action) {
-                // --- Encrypted Chat Handling --- NEW ---
-                case "e_chat": { // Use a distinct action for encrypted messages
+                case "e_chat": {
                     EncryptedPayload payload = EncryptedPayload.fromJson(data);
                     if (payload == null) {
                         System.err.println("[!] Received invalid encrypted chat payload from " + getPeerDisplayName());
@@ -929,84 +872,59 @@ public class P2PNode {
                     try {
                         String decryptedMessage = CryptoUtils.decrypt(payload, sharedKey);
 
-                        // Display and Log the DECRYPTED message
-                        System.out.print("\r[" + getPeerDisplayName() + "]: " + decryptedMessage + "\n" + getPrompt());
+                        // FIX: Print message cleanly without reprinting prompt from listener
+                        System.out.print("\r[" + getPeerDisplayName() + "]: " + decryptedMessage + "\n");
 
                         if (chatHistoryManager != null) {
                             long timestamp = System.currentTimeMillis();
-                            chatHistoryManager.addMessage(timestamp, senderId, connectedPeerUsername.get(), "RECEIVED", decryptedMessage); // Log plaintext
+                            chatHistoryManager.addMessage(timestamp, senderId, connectedPeerUsername.get(), "RECEIVED", decryptedMessage);
                         }
 
                     } catch (GeneralSecurityException e) {
-                         System.err.println("[!] Failed to decrypt message from " + getPeerDisplayName() + ". Possible tampering or key mismatch. " + e.getMessage());
-                         // Optionally: Disconnect on decryption failure? Could be a transient issue too.
+                         System.err.println("[!] Failed to decrypt message from " + getPeerDisplayName() + ". " + e.getMessage());
                     } catch (Exception e) {
                         System.err.println("[!] Error handling decrypted message from " + getPeerDisplayName() + ": " + e.getMessage());
                     }
                     break;
                 } // end case "e_chat"
 
-                case "keepalive":
-                    // Received keepalive. Good. No action needed currently.
-                    break;
-                case "ping":
+                case "keepalive": break; // Ignore received keepalives for now
+                case "ping": // Still respond to pings
                     JSONObject pongMsg = new JSONObject();
                     pongMsg.put("action", "pong");
                     pongMsg.put("node_id", myNodeId);
                     sendUdp(pongMsg, peerAddr);
                     break;
-                case "pong":
-                    // Ignore pongs when connected.
-                    break;
+                case "pong": break; // Ignore pongs when connected
                 default:
                     System.out.println("[?] Received unknown action '" + action + "' from connected peer " + getPeerDisplayName());
                     break;
             }
-        } else {
-             // Message received from unexpected peer or in unexpected state
-             // System.out.println("[?] Ignoring message from " + senderId.substring(0,8) + " @ " + peerAddr + " while in state " + stateNow); // Can be noisy
         }
     }
 
 
-    // --- Sending Messages ---
-
-    /** Safely sends a UDP datagram with JSON payload. Returns true on success, false on failure. */
+    // --- Sending Messages (sendUdp remains unchanged) ---
     private static boolean sendUdp(JSONObject jsonObject, InetSocketAddress destination) {
-        if (udpSocket == null || udpSocket.isClosed()) {
-            // System.err.println("[!] Cannot send UDP: Socket is null or closed."); // Too noisy potentially
-            return false;
-        }
-         if (destination == null) {
-            System.err.println("[!] Cannot send UDP: Destination address is null.");
-            return false;
-        }
+        if (udpSocket == null || udpSocket.isClosed()) return false;
+        if (destination == null) { System.err.println("[!] Cannot send UDP: Destination address is null."); return false; }
         try {
             byte[] data = jsonObject.toString().getBytes(StandardCharsets.UTF_8);
-            if (data.length > BUFFER_SIZE) {
-                System.err.println("[!] Cannot send UDP: Message size (" + data.length + ") exceeds buffer size (" + BUFFER_SIZE + ").");
-                return false;
-            }
+            if (data.length > BUFFER_SIZE) { System.err.println("[!] Cannot send UDP: Message size (" + data.length + ") exceeds buffer size (" + BUFFER_SIZE + ")."); return false; }
             DatagramPacket packet = new DatagramPacket(data, data.length, destination);
             udpSocket.send(packet);
             return true;
         } catch (PortUnreachableException e) {
-            // This often indicates the peer is offline or firewall blocking
             System.err.println("[!] Error sending UDP to " + destination + ": Port Unreachable.");
-            // If connected securely, this might indicate connection loss
             if (currentState == NodeState.CONNECTED_SECURE && destination.equals(peerAddrConfirmed.get())) {
                  System.out.println("[!] Connection possibly lost with " + getPeerDisplayName() + " (Port unreachable).");
-                 // Consider triggering resetConnectionState() here or letting keepalive timeout handle it.
+                 // Trigger disconnect more explicitly maybe? Set UDP path confirmed to false?
+                 // p2pUdpPathConfirmed.set(false); // This might trigger the disconnect in checkStateTransitions
             }
             return false;
         }
-        catch (IOException e) {
-            System.err.println("[!] IO Error sending UDP to " + destination + ": " + e.getMessage());
-            return false;
-        } catch (Exception e) {
-            System.err.println("[!] Unexpected Error sending UDP to " + destination + ": " + e.getClass().getName() + " - " + e.getMessage());
-             return false;
-        }
+        catch (IOException e) { System.err.println("[!] IO Error sending UDP to " + destination + ": " + e.getMessage()); return false;
+        } catch (Exception e) { System.err.println("[!] Unexpected Error sending UDP to " + destination + ": " + e.getClass().getName() + " - " + e.getMessage()); return false; }
     }
 
     /** Encrypts and sends a chat message to the currently connected peer. */
@@ -1015,130 +933,82 @@ public class P2PNode {
         String peerId = connectedPeerId.get();
         SecretKey sharedKey = (peerId != null) ? peerSymmetricKeys.get(peerId) : null;
 
-        // Ensure we are fully connected and have the key
         if (currentState == NodeState.CONNECTED_SECURE && peerAddr != null && peerId != null && sharedKey != null) {
             try {
                 EncryptedPayload payload = CryptoUtils.encrypt(message, sharedKey);
 
                 JSONObject chatMsg = new JSONObject();
-                chatMsg.put("action", "e_chat"); // Use new action for encrypted chat
+                chatMsg.put("action", "e_chat");
                 chatMsg.put("node_id", myNodeId);
-                // No need to send username in encrypted message, receiver knows who we are.
-                // Add the encrypted payload parts
                 chatMsg.put("iv", payload.ivBase64);
                 chatMsg.put("e_payload", payload.ciphertextBase64);
 
                 boolean sent = sendUdp(chatMsg, peerAddr);
 
-                // --- ADD SENT MESSAGE TO HISTORY (Plaintext) ---
                 if (sent && chatHistoryManager != null) {
                     long timestamp = System.currentTimeMillis();
-                    chatHistoryManager.addMessage(timestamp, peerId, connectedPeerUsername.get(), "SENT", message); // Log plaintext
+                    chatHistoryManager.addMessage(timestamp, peerId, connectedPeerUsername.get(), "SENT", message);
                 }
-                // --- END ADD SENT MESSAGE TO HISTORY ---
+                if (!sent) System.out.println("[!] Failed to send chat message. Connection might be lost.");
 
-                if (!sent) {
-                    System.out.println("[!] Failed to send chat message. Connection might be lost.");
-                }
-            } catch (GeneralSecurityException e) {
-                 System.err.println("[!] Failed to encrypt message: " + e.getMessage());
-                 // Should not happen with valid key unless crypto provider issue
-            } catch (Exception e) {
-                 System.err.println("[!] Unexpected error sending chat message: " + e.getMessage());
-            }
-        } else {
-            System.out.println("[!] Cannot send chat message, not securely connected or missing key.");
-             System.out.println("    Current State: " + currentState + ", Peer Address: " + peerAddr + ", Peer ID: " + peerId + ", Key Available: " + (sharedKey != null));
-        }
+            } catch (GeneralSecurityException e) { System.err.println("[!] Failed to encrypt message: " + e.getMessage());
+            } catch (Exception e) { System.err.println("[!] Unexpected error sending chat message: " + e.getMessage()); }
+        } else System.out.println("[!] Cannot send chat message, not securely connected or missing key.");
     }
 
-    // --- Cryptography Helpers --- NEW
-
+    // --- Cryptography Helpers ---
     /** Generates shared secret and derives/stores symmetric key */
     private static boolean generateSharedKeyAndStore(String peerId, String peerPublicKeyBase64) {
-        if (myKeyPair == null) {
-            System.err.println("[!] Cannot generate shared key: Own keypair is missing.");
-            return false;
-        }
-        if (peerId == null || peerPublicKeyBase64 == null) {
-            System.err.println("[!] Cannot generate shared key: Peer info missing.");
-            return false;
-        }
+        if (myKeyPair == null) { System.err.println("[!] Cannot generate shared key: Own keypair is missing."); return false; }
+        if (peerId == null || peerPublicKeyBase64 == null) { System.err.println("[!] Cannot generate shared key: Peer info missing."); return false; }
 
         try {
             PublicKey peerPublicKey = CryptoUtils.decodePublicKey(peerPublicKeyBase64);
-
-            System.out.println("[*] Performing ECDH key agreement with peer " + peerId.substring(0,8) + "...");
+            // Show full peer ID here
+            System.out.println("[*] Performing ECDH key agreement with peer " + peerId + "...");
             byte[] sharedSecretBytes = CryptoUtils.generateSharedSecret(myKeyPair.getPrivate(), peerPublicKey);
 
             System.out.println("[*] Deriving AES symmetric key from shared secret...");
             SecretKey derivedKey = CryptoUtils.deriveSymmetricKey(sharedSecretBytes);
 
-            // Store the key mapped to the peer ID
             peerSymmetricKeys.put(peerId, derivedKey);
-            sharedKeyEstablished.set(true); // Signal successful key generation
-            System.out.println("[+] Shared symmetric key established successfully for peer " + peerId.substring(0,8) + "!");
+            sharedKeyEstablished.set(true);
+            // Show full peer ID here
+            System.out.println("[+] Shared symmetric key established successfully for peer " + peerId + "!");
             return true;
 
-        } catch (NoSuchAlgorithmException e) {
-            System.err.println("[!] Crypto algorithm not supported: " + e.getMessage());
-        // } catch (InvalidKeySpecException e) {
-        //     System.err.println("[!] Invalid peer public key received: " + e.getMessage());
-        } catch (InvalidKeyException e) {
-            System.err.println("[!] Invalid key during key agreement: " + e.getMessage());
+        } catch (NoSuchAlgorithmException  | InvalidKeyException e) {
+             System.err.println("[!] Cryptographic error during key exchange: " + e.getMessage());
         } catch (Exception e) {
              System.err.println("[!] Unexpected error during shared key generation: " + e.getMessage());
              e.printStackTrace();
         }
-        sharedKeyEstablished.set(false); // Ensure flag is false on failure
+        sharedKeyEstablished.set(false);
         return false;
     }
 
 
-    // --- Shutdown ---
-
-    /** Gracefully shuts down the node, closing sockets and stopping threads. */
+    // --- Shutdown (Remains unchanged) ---
     private static synchronized void shutdown() {
         if (!running) return;
         System.out.println("\n[*] Shutting down node...");
         running = false;
 
-        // 1. Shutdown scheduled tasks forcefully
         if (scheduledExecutor != null && !scheduledExecutor.isShutdown()) {
-            scheduledExecutor.shutdownNow(); // Stop keepalives etc. immediately
+            scheduledExecutor.shutdownNow();
             System.out.println("[*] Scheduled executor shutdown requested.");
-             try {
-                if (!scheduledExecutor.awaitTermination(1, TimeUnit.SECONDS)) {
-                     System.err.println("[!] Scheduled executor did not terminate cleanly.");
-                } else { System.out.println("[*] Scheduled executor terminated."); }
-             } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+             try { if (!scheduledExecutor.awaitTermination(1, TimeUnit.SECONDS)) System.err.println("[!] Scheduled executor did not terminate cleanly."); else System.out.println("[*] Scheduled executor terminated."); }
+             catch (InterruptedException e) { Thread.currentThread().interrupt(); }
         }
-
-        // 2. Close UDP Socket
         if (udpSocket != null && !udpSocket.isClosed()) {
-            udpSocket.close();
-            System.out.println("[*] UDP Socket closed.");
+            udpSocket.close(); System.out.println("[*] UDP Socket closed.");
         }
-
-        // 3. Shutdown listener executor gracefully (allow processing final packets)
         if (listenerExecutor != null && !listenerExecutor.isShutdown()) {
-            listenerExecutor.shutdown();
-            System.out.println("[*] Listener executor shutdown requested.");
-             try {
-                if (!listenerExecutor.awaitTermination(1, TimeUnit.SECONDS)) { // Shorter wait
-                    System.err.println("[!] Listener thread did not terminate cleanly, forcing...");
-                    listenerExecutor.shutdownNow();
-                } else { System.out.println("[*] Listener executor terminated."); }
-             } catch (InterruptedException e) {
-                listenerExecutor.shutdownNow();
-                Thread.currentThread().interrupt();
-             }
+            listenerExecutor.shutdown(); System.out.println("[*] Listener executor shutdown requested.");
+             try { if (!listenerExecutor.awaitTermination(1, TimeUnit.SECONDS)) { System.err.println("[!] Listener thread did not terminate cleanly, forcing..."); listenerExecutor.shutdownNow(); } else System.out.println("[*] Listener executor terminated."); }
+             catch (InterruptedException e) { listenerExecutor.shutdownNow(); Thread.currentThread().interrupt(); }
         }
-
-        // Clear sensitive data
-        peerSymmetricKeys.clear();
-        myKeyPair = null; // Clear our keypair from memory
-
+        peerSymmetricKeys.clear(); myKeyPair = null;
         System.out.println("[*] Node shutdown sequence complete.");
     }
 } // End of P2PNode class
