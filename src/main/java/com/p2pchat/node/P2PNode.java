@@ -1082,8 +1082,8 @@ public class P2PNode {
 
         } catch (NoSuchAlgorithmException e) {
             System.err.println("[!] Crypto algorithm not supported: " + e.getMessage());
-        } catch (InvalidKeySpecException e) {
-            System.err.println("[!] Invalid peer public key received: " + e.getMessage());
+        // } catch (InvalidKeySpecException e) {
+        //     System.err.println("[!] Invalid peer public key received: " + e.getMessage());
         } catch (InvalidKeyException e) {
             System.err.println("[!] Invalid key during key agreement: " + e.getMessage());
         } catch (Exception e) {
