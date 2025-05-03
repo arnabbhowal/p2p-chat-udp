@@ -19,7 +19,7 @@ import java.util.stream.Collectors;
 public class CoordinationServer {
 
     private static final int PORT = 19999;
-    private static final int BUFFER_SIZE = 4096;
+    private static final int BUFFER_SIZE = 4096; // Increased slightly for potential key size
     private static final int NODE_TIMEOUT_MS = 120 * 1000; // 120 seconds
 
     // Use ConcurrentHashMap for thread safety
@@ -104,7 +104,7 @@ public class CoordinationServer {
                     nodesToRemove.add(nodeId);
                     Endpoint pubEp = nodeInfo.getPublicEndpointSeen();
                     String endpointStr = (pubEp != null) ? (pubEp.ip + ":" + pubEp.port) : "Unknown";
-                    System.out.println("[-] Node " + nodeInfo.username + " (" + nodeId + ") timed out (Last seen: " + ((now - nodeInfo.lastSeen)/1000) + "s ago, Last Addr: " + endpointStr + "). Removing.");
+                    System.out.println("[-] Node " + nodeInfo.username + " (" + nodeId.substring(0,8) + "...) timed out (Last seen: " + ((now - nodeInfo.lastSeen)/1000) + "s ago, Last Addr: " + endpointStr + "). Removing.");
                 }
             });
 
@@ -116,10 +116,10 @@ public class CoordinationServer {
                     boolean removedPendingFor = pendingConnections.values().removeIf(targetId -> targetId.equals(nodeId));
 
                     if (removedPendingBy || removedPendingFor) {
-                        System.out.println("    - Cleared pending requests associated with " + nodeId);
+                        System.out.println("    - Cleared pending requests associated with " + nodeId.substring(0,8) + "...");
                     }
                 }
-                System.out.println("[*] Cleanup complete. Current Nodes (" + nodes.size() + "): " + nodes.keySet());
+                System.out.println("[*] Cleanup complete. Current Nodes (" + nodes.size() + "): " + nodes.keySet().stream().map(id -> id.substring(0, Math.min(8, id.length())) + "...").collect(Collectors.joining(", ")));
             }
         } catch (Exception e) {
             System.err.println("[!!!] Error during node cleanup task: " + e.getMessage());
@@ -173,7 +173,7 @@ public class CoordinationServer {
         }
         // --- End Update ---
 
-        System.out.println("\n[+] UDP Received from [" + senderIp + "]:" + senderPort + " -> Action: " + (action != null ? action : "N/A") + " (Node: " + usernameForLog + ")");
+        // System.out.println("\n[+] UDP Received from [" + senderIp + "]:" + senderPort + " -> Action: " + (action != null ? action : "N/A") + " (Node: " + usernameForLog + ")"); // Make logging less verbose
 
 
         if ("register".equals(action)) {
@@ -183,9 +183,8 @@ public class CoordinationServer {
         } else if ("request_connection".equals(action)) {
             handleConnectionRequest(data, senderAddr, nodeInfo); // Pass potentially found nodeInfo
         } else {
-            if (action == null) {
-                System.out.println("[?] Received message with no action from " + senderAddr);
-            } else {
+            // Only log unknown actions if they exist, ignore messages without action silently
+            if (action != null && !action.isEmpty()) {
                 System.out.println("[!] Unknown action '" + action + "' received from " + senderAddr);
             }
         }
@@ -201,6 +200,19 @@ public class CoordinationServer {
              username = "User_" + newNodeId.substring(0, 4); // Ensure non-empty
         }
         newNodeInfo.username = username.trim(); // Store it in NodeInfo
+
+        // Extract and store public key (Base64 encoded)
+        String publicKeyBase64 = data.optString("public_key", null);
+        if (publicKeyBase64 == null || publicKeyBase64.trim().isEmpty()) {
+            System.out.println("[!] Registration failed: Missing 'public_key' from " + senderAddr);
+            JSONObject errorResponse = new JSONObject();
+            errorResponse.put("status", "error");
+            errorResponse.put("message", "Registration failed: 'public_key' field is missing or empty.");
+            sendResponse(errorResponse, senderAddr);
+            return;
+        }
+        // Basic validation (e.g., check if it's valid Base64?) - could add later
+        newNodeInfo.publicKeyBase64 = publicKeyBase64.trim();
 
 
         JSONArray localEndpointsJson = data.optJSONArray("local_endpoints");
@@ -252,8 +264,9 @@ public class CoordinationServer {
         }
 
         sendResponse(response, senderAddr);
-        System.out.println("[*] Node registered: " + newNodeInfo.username + " (" + newNodeId + ") (" + nodes.size() + " total)"); // Log username
+        System.out.println("[*] Node registered: " + newNodeInfo.username + " (" + newNodeId.substring(0,8) + "...) (" + nodes.size() + " total)");
         System.out.println("    Endpoints recorded: " + newNodeInfo.endpoints.stream().map(Endpoint::toString).collect(Collectors.joining(", ")));
+        System.out.println("    Public Key stored: " + (newNodeInfo.publicKeyBase64 != null ? "Yes" : "No"));
         System.out.println("    Source Addr: " + senderAddr);
     }
 
@@ -282,15 +295,25 @@ public class CoordinationServer {
         }
 
         if (requesterInfo == null) {
-            System.out.println("[!] Connection request from unknown node " + requesterId + ". Asking to re-register.");
+            System.out.println("[!] Connection request from unknown node " + requesterId.substring(0,8) + ". Asking to re-register.");
             JSONObject response = new JSONObject();
             response.put("status", "error");
             response.put("message", "Unknown node ID. Please re-register first.");
             sendResponse(response, senderAddr);
             return;
         }
+        // Check if requester has a public key stored (needed for exchange)
+        if (requesterInfo.publicKeyBase64 == null || requesterInfo.publicKeyBase64.isEmpty()) {
+             System.out.println("[!] Connection request from node " + requesterInfo.username + " ("+requesterId.substring(0,8)+") without a stored public key. Asking to re-register.");
+             JSONObject response = new JSONObject();
+             response.put("status", "error");
+             response.put("message", "Missing public key on server. Please re-register.");
+             sendResponse(response, senderAddr);
+             return;
+        }
+
         if (requesterId.equals(targetId)) {
-            System.out.println("[!] Node " + requesterInfo.username + " (" + requesterId + ") tried to connect to itself. Ignoring.");
+            System.out.println("[!] Node " + requesterInfo.username + " (" + requesterId.substring(0,8) + ") tried to connect to itself. Ignoring.");
              JSONObject response = new JSONObject();
              response.put("status", "error");
              response.put("message", "Cannot connect to yourself.");
@@ -313,7 +336,20 @@ public class CoordinationServer {
             return;
         }
 
-        // Both requester and target are known, store request
+        // Check if target has a public key stored
+        if (targetInfo.publicKeyBase64 == null || targetInfo.publicKeyBase64.isEmpty()) {
+             System.out.println("[!] Target node " + targetInfo.username + " (" + targetId.substring(0,8) + ") does not have a public key stored. Cannot complete connection.");
+             // Inform requester
+             JSONObject response = new JSONObject();
+             response.put("status", "error");
+             response.put("message", "Target node " + targetInfo.username + " is missing a public key on the server. Cannot connect.");
+             sendResponse(response, senderAddr);
+             // We don't store the pending connection if target is invalid
+             return;
+        }
+
+
+        // Both requester and target are known and have keys, store request
         pendingConnections.put(requesterId, targetId);
 
         // Check if the target has also requested the requester (match)
@@ -331,33 +367,35 @@ public class CoordinationServer {
                  return;
             }
 
-            // Prepare payload for Requester (Node A) -> Contains Target's (Node B) info
+            // --- Prepare payload for Requester (Node A) -> Contains Target's (Node B) info ---
             JSONObject responseA = new JSONObject();
             responseA.put("action", "connection_info");
             responseA.put("status", "match_found");
             responseA.put("peer_id", targetId);
-            responseA.put("peer_username", targetInfo.username); // <-- Add target username
+            responseA.put("peer_username", targetInfo.username);
+            responseA.put("peer_public_key", targetInfo.publicKeyBase64); // <-- ADD TARGET'S PUBLIC KEY
             JSONArray endpointsB = new JSONArray();
             targetInfo.endpoints.forEach(ep -> endpointsB.put(ep.toJson()));
             responseA.put("peer_endpoints", endpointsB);
 
-            // Prepare payload for Target (Node B) -> Contains Requester's (Node A) info
+            // --- Prepare payload for Target (Node B) -> Contains Requester's (Node A) info ---
             JSONObject responseB = new JSONObject();
             responseB.put("action", "connection_info");
             responseB.put("status", "match_found");
             responseB.put("peer_id", requesterId);
-            responseB.put("peer_username", requesterInfo.username); // <-- Add requester username
+            responseB.put("peer_username", requesterInfo.username);
+            responseB.put("peer_public_key", requesterInfo.publicKeyBase64); // <-- ADD REQUESTER'S PUBLIC KEY
             JSONArray endpointsA = new JSONArray();
             requesterInfo.endpoints.forEach(ep -> endpointsA.put(ep.toJson()));
             responseB.put("peer_endpoints", endpointsA);
 
             // Send info to both nodes using their last known address
             boolean sentA = sendResponse(responseA, addrA);
-            if(sentA) System.out.println("    -> Sent " + targetInfo.username + "'s info to " + requesterInfo.username + " @ " + addrA);
+            if(sentA) System.out.println("    -> Sent " + targetInfo.username + "'s info (incl. PubKey) to " + requesterInfo.username + " @ " + addrA);
             else System.err.println("[!!!] FAILED to send info to Requester " + requesterInfo.username + " @ " + addrA);
 
             boolean sentB = sendResponse(responseB, addrB);
-            if(sentB) System.out.println("    -> Sent " + requesterInfo.username + "'s info to " + targetInfo.username + " @ " + addrB);
+            if(sentB) System.out.println("    -> Sent " + requesterInfo.username + "'s info (incl. PubKey) to " + targetInfo.username + " @ " + addrB);
             else System.err.println("[!!!] FAILED to send info to Target " + targetInfo.username + " @ " + addrB);
 
 
@@ -383,6 +421,10 @@ public class CoordinationServer {
         }
         try {
             byte[] data = jsonObject.toString().getBytes(StandardCharsets.UTF_8);
+            if (data.length > BUFFER_SIZE) {
+                 System.err.println("[!] Cannot send response: Message size (" + data.length + ") exceeds buffer size (" + BUFFER_SIZE + ").");
+                 return false; // Avoid sending oversized packets
+            }
             DatagramPacket packet = new DatagramPacket(data, data.length, destination);
             socket.send(packet);
             return true;
@@ -429,5 +471,4 @@ public class CoordinationServer {
 
         System.out.println("[*] Server shutdown sequence complete.");
     }
-
 }

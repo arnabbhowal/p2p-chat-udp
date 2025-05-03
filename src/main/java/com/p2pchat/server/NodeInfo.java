@@ -14,7 +14,8 @@ import java.util.concurrent.CopyOnWriteArrayList;
 // Represents information stored about a registered node
 class NodeInfo { // Keep package-private
     String nodeId;
-    String username; // << NEW: Store username
+    String username;
+    String publicKeyBase64; // << NEW: Store node's public key (Base64 encoded)
     List<Endpoint> endpoints = new CopyOnWriteArrayList<>(); // Thread-safe list
     long lastSeen;
     InetSocketAddress lastAddr; // Last address the node contacted us from
@@ -23,7 +24,8 @@ class NodeInfo { // Keep package-private
         this.nodeId = nodeId;
         this.lastSeen = Instant.now().toEpochMilli();
         this.lastAddr = initialAddr;
-        this.username = "User_" + nodeId.substring(0,4); // Default username until set by register
+        this.username = "User_" + nodeId.substring(0,4); // Default username
+        this.publicKeyBase64 = null; // Initialize public key as null
     }
 
     void updateLastSeen(InetSocketAddress currentAddr) {
@@ -59,7 +61,7 @@ class NodeInfo { // Keep package-private
             if (ep.type != null && ep.type.equals(type)) {
                 // Only update if IP or port actually changed
                 if (!ep.ip.equals(publicIp) || ep.port != publicPort) {
-                    System.out.println("    Updating existing " + type + " for " + nodeId + " from " + ep.ip + ":" + ep.port + " to " + publicIp + ":" + publicPort);
+                    // System.out.println("    Updating existing " + type + " for " + nodeId + " from " + ep.ip + ":" + ep.port + " to " + publicIp + ":" + publicPort); // Less noisy
                     ep.ip = publicIp;
                     ep.port = publicPort;
                 }
@@ -70,7 +72,7 @@ class NodeInfo { // Keep package-private
         if (!found) {
             Endpoint newPublicEp = new Endpoint(publicIp, publicPort, type);
             endpoints.add(0, newPublicEp); // Add to beginning
-            System.out.println("    Added new " + type + " for " + nodeId + ": " + publicIp + ":" + publicPort);
+            // System.out.println("    Added new " + type + " for " + nodeId + ": " + publicIp + ":" + publicPort); // Less noisy
         }
     }
 
