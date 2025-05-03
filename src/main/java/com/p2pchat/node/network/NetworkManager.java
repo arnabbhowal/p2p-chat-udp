@@ -15,8 +15,11 @@ public class NetworkManager {
 
     private final NodeContext context;
     private MessageHandler messageHandler; // Removed final, will be set via setter
-    private final ExecutorService listenerExecutor = Executors.newSingleThreadExecutor(r -> new Thread(r, "UDPListenerThread"));
-
+    private final ExecutorService listenerExecutor = Executors.newSingleThreadExecutor(r -> {
+        Thread t = new Thread(r, "UDPListenerThread");
+        t.setDaemon(true); // Make the listener thread a daemon thread
+        return t;
+    });
     // Constructor now only needs context
     public NetworkManager(NodeContext context) {
         this.context = context;
