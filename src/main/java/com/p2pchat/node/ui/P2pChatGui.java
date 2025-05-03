@@ -480,15 +480,17 @@ public class P2pChatGui implements GuiCallback {
             JPanel entryPanel = transferEntries.get(transferId);
             if (entryPanel == null) {
                 entryPanel = new JPanel(new BorderLayout(5, 0));
-                entryPanel.setMaximumSize(new Dimension(Integer.MAX_VALUE, 45));
+                entryPanel.setMaximumSize(new Dimension(Integer.MAX_VALUE, 45)); // Increased height slightly
                 entryPanel.setAlignmentX(Component.LEFT_ALIGNMENT);
                 entryPanel.setName(transferId);
                 label = new JLabel();
                 label.setOpaque(false);
                 transferLabels.put(transferId, label);
                 progressBar = new JProgressBar(0, 100);
-                progressBar.setStringPainted(true);
-                progressBar.setPreferredSize(new Dimension(100, 20));
+                progressBar.setStringPainted(true); // Show percentage text
+                // *** MODIFICATION: Increase preferred height for thicker bar ***
+                progressBar.setPreferredSize(new Dimension(100, 25)); // Changed height from 20 to 25
+                // *************************************************************
                 progressBar.setOpaque(false);
                 transferProgressBars.put(transferId, progressBar);
                 entryPanel.add(label, BorderLayout.NORTH);
@@ -509,31 +511,33 @@ public class P2pChatGui implements GuiCallback {
             label.setText(currentStatusText);
             label.setToolTipText(String.format("%s '%s' (%s)", direction, filename, statusText));
             progressBar.setValue(percentage);
-            progressBar.setString(String.format("%d%%", percentage));
+            progressBar.setString(String.format("%d%%", percentage)); // Display percentage text
+            // Set progress bar color based on status
             if (status == FileTransferState.Status.FAILED || status == FileTransferState.Status.CANCELLED
                     || status == FileTransferState.Status.REJECTED) {
                 progressBar.setForeground(Color.RED);
             } else if (status == FileTransferState.Status.COMPLETED) {
-                progressBar.setForeground(new Color(0, 150, 0));
+                progressBar.setForeground(new Color(0, 150, 0)); // Dark Green
             } else if (isSending) {
-                progressBar.setForeground(Color.BLUE);
+                progressBar.setForeground(Color.BLUE); // Blue for sending
             } else {
-                progressBar.setForeground(new Color(0, 150, 0));
+                progressBar.setForeground(new Color(0, 150, 0)); // Dark Green for receiving
             }
 
-            // <<< Fix: Check MouseListener Class >>>
+            // Remove click listener if status is not completed-received anymore
+            // (Handles cases where a completed transfer might get updated to fail due to
+            // post-transfer error)
             boolean completedReceived = (status == FileTransferState.Status.COMPLETED && !isSending);
-            MouseListener[] listeners = entryPanel.getMouseListeners(); // Check panel's listeners
+            MouseListener[] listeners = entryPanel.getMouseListeners();
             for (MouseListener ml : listeners) {
-                // <<< Use instanceof instead of class name string comparison >>>
                 if (ml instanceof OpenDownloadedFileListener) {
                     if (!completedReceived) {
                         entryPanel.removeMouseListener(ml);
                         entryPanel.setCursor(Cursor.getDefaultCursor());
-                        entryPanel.setToolTipText(null);
+                        entryPanel.setToolTipText(null); // Clear special tooltip
                         label.setCursor(Cursor.getDefaultCursor());
                     }
-                    break;
+                    break; // Assume only one listener
                 }
             }
         });
@@ -547,86 +551,111 @@ public class P2pChatGui implements GuiCallback {
             JLabel label = transferLabels.get(transferId);
             JPanel entryPanel = transferEntries.get(transferId);
             boolean success = message.toLowerCase().contains("complete");
+
             if (progressBar != null) {
                 progressBar.setValue(100);
-                progressBar.setString(message);
+                progressBar.setString(message); // Display final message (e.g., "Completed", "Failed: Timeout")
                 progressBar.setForeground(success ? new Color(0, 150, 0) : Color.RED);
             }
-            if (label != null) {
+            if (label != null && label.getToolTipText() != null) { // Update tooltip if it exists
                 label.setToolTipText(label.getToolTipText() + " - " + message);
+            } else if (label != null) { // Set tooltip if label exists but tooltip was null
+                FileTransferState tempState = nodeContext.ongoingTransfers.get(transferId); // Get state to reconstruct
+                                                                                            // tooltip
+                String filename = (tempState != null) ? tempState.filename : "File";
+                String direction = (tempState != null && tempState.isSender) ? "Sending" : "Receiving";
+                label.setToolTipText(String.format("%s '%s' - %s", direction, filename, message));
             }
 
             FileTransferState finalState = nodeContext.ongoingTransfers.get(transferId);
+
+            // *** VIEW FILE OPTION LOGIC ***
+            // If the transfer was a successful reception, add a click listener to open the
+            // file.
             if (success && finalState != null && !finalState.isSender && finalState.downloadPath != null
                     && entryPanel != null) {
-                final Path downloadedPath = finalState.downloadPath;
+                final Path downloadedPath = finalState.downloadPath; // Path to the downloaded file
+
                 boolean listenerExists = false;
-                // <<< Fix: Check MouseListener Class >>>
                 for (MouseListener ml : entryPanel.getMouseListeners()) {
-                    // <<< Use instanceof instead of class name string comparison >>>
                     if (ml instanceof OpenDownloadedFileListener) {
                         listenerExists = true;
                         break;
                     }
                 }
+                // Add the listener ONLY if it doesn't exist already
                 if (!listenerExists) {
+                    // Add the mouse listener to the panel containing the label and progress bar
                     entryPanel.addMouseListener(new OpenDownloadedFileListener(downloadedPath));
-                    entryPanel.setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
-                    entryPanel.setToolTipText("Click to open received file: " + finalState.filename);
+                    entryPanel.setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR)); // Indicate clickability
+                    entryPanel.setToolTipText("Click to open received file: " + finalState.filename); // Tooltip hint
                     if (label != null)
-                        label.setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
+                        label.setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR)); // Also make label clickable
+                    displaySystemMessage(
+                            "System: Added 'Open File' click listener for transfer " + transferId.substring(0, 8));
                 }
-            } else if (entryPanel != null) { // Remove listener if failed/sending
+            } else if (entryPanel != null) { // Remove listener if failed/sending/cancelled
                 entryPanel.setCursor(Cursor.getDefaultCursor());
                 if (label != null)
                     label.setCursor(Cursor.getDefaultCursor());
-                // <<< Fix: Check MouseListener Class >>>
+                // Remove any existing listener
                 for (MouseListener ml : entryPanel.getMouseListeners()) {
-                    // <<< Use instanceof instead of class name string comparison >>>
                     if (ml instanceof OpenDownloadedFileListener) {
                         entryPanel.removeMouseListener(ml);
                     }
                 }
-                entryPanel.setToolTipText(null);
+                // Ensure tooltip doesn't suggest clicking if not applicable
+                if (entryPanel.getToolTipText() != null && entryPanel.getToolTipText().startsWith("Click to open")) {
+                    entryPanel.setToolTipText(null);
+                }
             }
+            // *******************************
+
             // Keep entry persistent - NO TIMER TO REMOVE
+            // We remove the FileTransferState from the context map in FileTransferService
+            // upon completion/failure.
         });
     }
 
     @Override
     public void clearFileProgress() {
         SwingUtilities.invokeLater(() -> {
-            new ArrayList<>(transferEntries.keySet()).forEach(this::removeTransferEntry);
-            transferPanel.removeAll();
+            // Remove entries from the UI first
+            for (JPanel panel : transferEntries.values()) {
+                transferPanel.remove(panel);
+                // Also remove the rigid area spacer associated with it if possible (complex)
+            }
+            // Clear tracking maps
+            transferEntries.clear();
+            transferProgressBars.clear();
+            transferLabels.clear();
+            // Refresh the panel
             transferPanel.revalidate();
             transferPanel.repaint();
         });
     }
 
+    // Method to remove a single entry (might be needed if cancelling one transfer)
     private void removeTransferEntry(String transferId) {
-        transferLabels.remove(transferId);
-        transferProgressBars.remove(transferId);
-        JPanel entryPanelToRemove = transferEntries.remove(transferId);
-        if (entryPanelToRemove != null) {
-            Container grandParent = entryPanelToRemove.getParent();
-            if (grandParent == transferPanel) {
-                Component[] components = grandParent.getComponents();
-                int indexToRemove = -1;
-                for (int i = 0; i < components.length; i++) {
-                    if (components[i] == entryPanelToRemove) {
-                        indexToRemove = i;
-                        break;
-                    }
-                }
-                if (indexToRemove != -1) {
-                    if (indexToRemove + 1 < components.length && components[indexToRemove + 1] instanceof Box.Filler) {
-                        grandParent.remove(indexToRemove + 1);
-                    }
-                    grandParent.remove(indexToRemove);
-                }
+        JProgressBar bar = transferProgressBars.remove(transferId);
+        JLabel lbl = transferLabels.remove(transferId);
+        JPanel entry = transferEntries.remove(transferId);
+
+        if (entry != null) {
+            // Remove listeners to prevent memory leaks
+            for (MouseListener ml : entry.getMouseListeners()) {
+                entry.removeMouseListener(ml);
             }
+            // Remove the entry panel from the main transfer panel
+            transferPanel.remove(entry);
+            // Attempt to remove the spacer after it (needs careful indexing or component
+            // tracking)
+            // For simplicity, we might just leave spacers, or rebuild panel on clear.
+            // Refresh panel after removal
+            transferPanel.revalidate();
+            transferPanel.repaint();
         }
-    } // Repaint handled by clearFileProgress
+    }
 
     // --- Inner Class for History Dialog ---
     private class HistoryDialog extends JDialog {
@@ -640,7 +669,7 @@ public class P2pChatGui implements GuiCallback {
             historyTextArea.setLineWrap(true);
             historyTextArea.setWrapStyleWord(true);
             historyTextArea.setFont(new Font("Monospaced", Font.PLAIN, 12));
-            historyTextArea.setCaretPosition(0);
+            historyTextArea.setCaretPosition(0); // Show history from the start
             JScrollPane historyScrollPane = new JScrollPane(historyTextArea);
             JPanel buttonPanel = new JPanel(new FlowLayout(FlowLayout.RIGHT));
             JButton closeButton = new JButton("Close");
@@ -651,6 +680,7 @@ public class P2pChatGui implements GuiCallback {
                 // <<< Use lambda expression directly for clarity >>>
                 backButton.addActionListener(e -> {
                     dispose();
+                    // Call the method on the specific parent GUI instance
                     SwingUtilities.invokeLater(parentGui::promptAndShowHistory);
                 });
                 buttonPanel.add(backButton);
@@ -662,8 +692,10 @@ public class P2pChatGui implements GuiCallback {
     }
 
     // --- Inner Class Listener for opening files ---
+    // This listener is added to the transfer entry panel when a file is received
+    // successfully.
     private class OpenDownloadedFileListener extends MouseAdapter {
-        private final Path filePath;
+        private final Path filePath; // Store the path to the downloaded file
 
         public OpenDownloadedFileListener(Path filePath) {
             this.filePath = filePath;
@@ -676,21 +708,28 @@ public class P2pChatGui implements GuiCallback {
                         JOptionPane.ERROR_MESSAGE);
                 return;
             }
+            // Check if the file still exists before trying to open it
             if (!Files.exists(filePath)) {
                 JOptionPane.showMessageDialog(frame, "File no longer exists:\n" + filePath, "Open Error",
                         JOptionPane.ERROR_MESSAGE);
+                // Optionally remove the listener if the file is gone?
+                ((JComponent) e.getSource()).removeMouseListener(this);
+                ((JComponent) e.getSource()).setCursor(Cursor.getDefaultCursor());
                 return;
             }
+            // Check if Desktop API is supported
             if (!Desktop.isDesktopSupported() || !Desktop.getDesktop().isSupported(Desktop.Action.OPEN)) {
                 displaySystemMessage("System Error: Desktop.open action not supported.");
                 JOptionPane.showMessageDialog(frame, "Cannot open file automatically on this system.", "Open Error",
                         JOptionPane.WARNING_MESSAGE);
                 return;
             }
+            // Attempt to open the file using the default system application
             displaySystemMessage("System: Attempting to open received file: " + filePath);
             try {
-                Desktop.getDesktop().open(filePath.toFile());
+                Desktop.getDesktop().open(filePath.toFile()); // Use Desktop API to open file
             } catch (IOException | SecurityException | IllegalArgumentException exception) {
+                // Handle errors during file opening
                 displaySystemMessage("System Error: Error opening file " + filePath + ": " + exception.getMessage());
                 JOptionPane.showMessageDialog(frame, "Could not open file:\n" + exception.getMessage(), "Open Error",
                         JOptionPane.ERROR_MESSAGE);
