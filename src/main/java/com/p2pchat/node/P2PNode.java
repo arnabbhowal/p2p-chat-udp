@@ -170,7 +170,7 @@ public class P2PNode {
             fileTransferService = new FileTransferService(nodeContext, networkManager);
 
             // Initialize message handlers (these don't hold the callback directly in this design)
-            ServerMessageHandler serverMsgHandler = new ServerMessageHandler(nodeContext, connectionService, chatService);
+            ServerMessageHandler serverMsgHandler = new ServerMessageHandler(nodeContext, connectionService, chatService, registrationService);
             PeerMessageHandler peerMsgHandler = new PeerMessageHandler(nodeContext, connectionService, chatService, fileTransferService, networkManager);
             MessageHandler messageHandler = new MessageHandler(nodeContext, serverMsgHandler, peerMsgHandler, connectionService);
 
@@ -189,6 +189,8 @@ public class P2PNode {
 
     // Helper to set the callback on all relevant services
     // *** ASSUMES setGuiCallback(GuiCallback) methods exist in these classes ***
+    // Helper to set the callback on all relevant services
+    // *** ASSUMES setGuiCallback(GuiCallback) methods exist in these classes ***
     private static void setGuiCallbackForAllServices(GuiCallback callback) {
         System.out.println("[*] Setting GUI callbacks for backend services...");
         if (callback == null) {
@@ -202,24 +204,12 @@ public class P2PNode {
             fileTransferService.setGuiCallback(callback);
             registrationService.setGuiCallback(callback); // For displaying Node ID post-registration
 
-            // Also set callback for message handlers if they directly update GUI state
-            // This requires adding the method and potentially getters in MessageHandler
-            MessageHandler msgHandler = networkManager.getMessageHandler(); // Assume getter exists
-             if (msgHandler != null) {
-                 // Option 1: Handler holds callback (Requires adding setter to handlers)
-                 // msgHandler.getServerMessageHandler().setGuiCallback(callback);
-                 // msgHandler.getPeerMessageHandler().setGuiCallback(callback);
+            // Set callbacks only on the primary services.
+            // These services should handle interpreting events (potentially triggered by
+            // message handlers) and updating the GUI accordingly via the callback.
+            System.out.println("[+] GUI callbacks set for services."); // Log success
 
-                 // Option 2: Services handle ALL GUI updates (Preferred)
-                 // No need to set callback on handlers if services manage all GUI updates
-                 System.out.println("[*] Note: Assumes services handle all GUI updates via callbacks.");
-
-             } else {
-                 System.err.println("[!] Could not get MessageHandler to set callbacks.");
-             }
-             System.out.println("[+] GUI callbacks set.");
-
-        } catch (NullPointerException npe) {
+        } catch (NullPointerException npe) { // Keep the catch block
              System.err.println("[!!!] Error setting GUI callbacks: A service reference is null. Initialization failed.");
              npe.printStackTrace();
              // Handle this critical error, maybe exit?
