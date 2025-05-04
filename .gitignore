@@ -22,3 +22,6 @@ build/
 
 # Chat history logs (CSV files)
 chat_history/
+
+#Downloads
+downloads/
