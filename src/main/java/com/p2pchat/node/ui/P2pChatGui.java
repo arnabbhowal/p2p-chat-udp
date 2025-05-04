@@ -525,8 +525,7 @@ public class P2pChatGui implements GuiCallback {
             }
 
             // Remove click listener if status is not completed-received anymore
-            // (Handles cases where a completed transfer might get updated to fail due to
-            // post-transfer error)
+            // (Handles cases where a completed transfer might get updated to fail due to post-transfer error)
             boolean completedReceived = (status == FileTransferState.Status.COMPLETED && !isSending);
             MouseListener[] listeners = entryPanel.getMouseListeners();
             for (MouseListener ml : listeners) {
@@ -558,22 +557,20 @@ public class P2pChatGui implements GuiCallback {
                 progressBar.setForeground(success ? new Color(0, 150, 0) : Color.RED);
             }
             if (label != null && label.getToolTipText() != null) { // Update tooltip if it exists
-                label.setToolTipText(label.getToolTipText() + " - " + message);
+                 label.setToolTipText(label.getToolTipText() + " - " + message);
             } else if (label != null) { // Set tooltip if label exists but tooltip was null
-                FileTransferState tempState = nodeContext.ongoingTransfers.get(transferId); // Get state to reconstruct
-                                                                                            // tooltip
-                String filename = (tempState != null) ? tempState.filename : "File";
-                String direction = (tempState != null && tempState.isSender) ? "Sending" : "Receiving";
-                label.setToolTipText(String.format("%s '%s' - %s", direction, filename, message));
+                 FileTransferState tempState = nodeContext.ongoingTransfers.get(transferId); // Get state to reconstruct tooltip
+                 String filename = (tempState != null) ? tempState.filename : "File";
+                 String direction = (tempState != null && tempState.isSender) ? "Sending" : "Receiving";
+                 label.setToolTipText(String.format("%s '%s' - %s", direction, filename, message));
             }
+
 
             FileTransferState finalState = nodeContext.ongoingTransfers.get(transferId);
 
             // *** VIEW FILE OPTION LOGIC ***
-            // If the transfer was a successful reception, add a click listener to open the
-            // file.
-            if (success && finalState != null && !finalState.isSender && finalState.downloadPath != null
-                    && entryPanel != null) {
+            // If the transfer was a successful reception, add a click listener to open the file.
+            if (success && finalState != null && !finalState.isSender && finalState.downloadPath != null && entryPanel != null) {
                 final Path downloadedPath = finalState.downloadPath; // Path to the downloaded file
 
                 boolean listenerExists = false;
@@ -585,45 +582,42 @@ public class P2pChatGui implements GuiCallback {
                 }
                 // Add the listener ONLY if it doesn't exist already
                 if (!listenerExists) {
-                    // Add the mouse listener to the panel containing the label and progress bar
+                     // Add the mouse listener to the panel containing the label and progress bar
                     entryPanel.addMouseListener(new OpenDownloadedFileListener(downloadedPath));
                     entryPanel.setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR)); // Indicate clickability
                     entryPanel.setToolTipText("Click to open received file: " + finalState.filename); // Tooltip hint
-                    if (label != null)
-                        label.setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR)); // Also make label clickable
-                    displaySystemMessage(
-                            "System: Added 'Open File' click listener for transfer " + transferId.substring(0, 8));
+                    if (label != null) label.setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR)); // Also make label clickable
+                     displaySystemMessage("System: Added 'Open File' click listener for transfer " + transferId.substring(0,8));
                 }
             } else if (entryPanel != null) { // Remove listener if failed/sending/cancelled
                 entryPanel.setCursor(Cursor.getDefaultCursor());
-                if (label != null)
-                    label.setCursor(Cursor.getDefaultCursor());
+                if (label != null) label.setCursor(Cursor.getDefaultCursor());
                 // Remove any existing listener
                 for (MouseListener ml : entryPanel.getMouseListeners()) {
                     if (ml instanceof OpenDownloadedFileListener) {
                         entryPanel.removeMouseListener(ml);
                     }
                 }
-                // Ensure tooltip doesn't suggest clicking if not applicable
-                if (entryPanel.getToolTipText() != null && entryPanel.getToolTipText().startsWith("Click to open")) {
-                    entryPanel.setToolTipText(null);
-                }
+                 // Ensure tooltip doesn't suggest clicking if not applicable
+                 if (entryPanel.getToolTipText() != null && entryPanel.getToolTipText().startsWith("Click to open")) {
+                      entryPanel.setToolTipText(null);
+                 }
             }
             // *******************************
 
             // Keep entry persistent - NO TIMER TO REMOVE
-            // We remove the FileTransferState from the context map in FileTransferService
-            // upon completion/failure.
+            // We remove the FileTransferState from the context map in FileTransferService upon completion/failure.
         });
     }
+
 
     @Override
     public void clearFileProgress() {
         SwingUtilities.invokeLater(() -> {
-            // Remove entries from the UI first
+             // Remove entries from the UI first
             for (JPanel panel : transferEntries.values()) {
-                transferPanel.remove(panel);
-                // Also remove the rigid area spacer associated with it if possible (complex)
+                 transferPanel.remove(panel);
+                 // Also remove the rigid area spacer associated with it if possible (complex)
             }
             // Clear tracking maps
             transferEntries.clear();
@@ -642,18 +636,17 @@ public class P2pChatGui implements GuiCallback {
         JPanel entry = transferEntries.remove(transferId);
 
         if (entry != null) {
-            // Remove listeners to prevent memory leaks
-            for (MouseListener ml : entry.getMouseListeners()) {
-                entry.removeMouseListener(ml);
-            }
-            // Remove the entry panel from the main transfer panel
-            transferPanel.remove(entry);
-            // Attempt to remove the spacer after it (needs careful indexing or component
-            // tracking)
-            // For simplicity, we might just leave spacers, or rebuild panel on clear.
-            // Refresh panel after removal
-            transferPanel.revalidate();
-            transferPanel.repaint();
+             // Remove listeners to prevent memory leaks
+             for (MouseListener ml : entry.getMouseListeners()) {
+                 entry.removeMouseListener(ml);
+             }
+             // Remove the entry panel from the main transfer panel
+             transferPanel.remove(entry);
+             // Attempt to remove the spacer after it (needs careful indexing or component tracking)
+             // For simplicity, we might just leave spacers, or rebuild panel on clear.
+             // Refresh panel after removal
+             transferPanel.revalidate();
+             transferPanel.repaint();
         }
     }
 
@@ -692,8 +685,7 @@ public class P2pChatGui implements GuiCallback {
     }
 
     // --- Inner Class Listener for opening files ---
-    // This listener is added to the transfer entry panel when a file is received
-    // successfully.
+    // This listener is added to the transfer entry panel when a file is received successfully.
     private class OpenDownloadedFileListener extends MouseAdapter {
         private final Path filePath; // Store the path to the downloaded file
 
@@ -712,9 +704,9 @@ public class P2pChatGui implements GuiCallback {
             if (!Files.exists(filePath)) {
                 JOptionPane.showMessageDialog(frame, "File no longer exists:\n" + filePath, "Open Error",
                         JOptionPane.ERROR_MESSAGE);
-                // Optionally remove the listener if the file is gone?
-                ((JComponent) e.getSource()).removeMouseListener(this);
-                ((JComponent) e.getSource()).setCursor(Cursor.getDefaultCursor());
+                 // Optionally remove the listener if the file is gone?
+                 ((JComponent)e.getSource()).removeMouseListener(this);
+                 ((JComponent)e.getSource()).setCursor(Cursor.getDefaultCursor());
                 return;
             }
             // Check if Desktop API is supported
