@@ -16,7 +16,7 @@ import java.awt.datatransfer.StringSelection;
 import java.awt.event.ActionEvent;
 import java.awt.event.MouseAdapter;
 import java.awt.event.MouseEvent;
-import java.awt.event.MouseListener; // <<< ADDED IMPORT
+import java.awt.event.MouseListener;
 import java.awt.event.WindowAdapter;
 import java.awt.event.WindowEvent;
 import java.io.File;
@@ -270,7 +270,6 @@ public class P2pChatGui implements GuiCallback {
         }
     }
 
-    // <<< Changed visibility from private to public >>>
     public void promptAndShowHistory() {
         displaySystemMessage("System: Listing available chat histories...");
         List<ChatHistoryManager.HistoryInfo> availableHistories = ChatHistoryManager.listAvailableHistories();
@@ -365,7 +364,9 @@ public class P2pChatGui implements GuiCallback {
         SwingUtilities.invokeLater(() -> {
             nodeIdLabel.setText("Node ID: " + nodeId);
             copyIdButton.setEnabled(this.ownNodeId != null);
-            viewHistoryButton.setEnabled(this.ownNodeId != null);
+            if (nodeContext.currentState.get() != NodeState.CONNECTED_SECURE) { 
+                viewHistoryButton.setEnabled(this.ownNodeId != null && nodeContext.currentState.get() != NodeState.INITIALIZING && nodeContext.currentState.get() != NodeState.REGISTERING);
+            }
             displaySystemMessage("System: Registered with ID: " + nodeId);
         });
     }
@@ -373,66 +374,69 @@ public class P2pChatGui implements GuiCallback {
     @Override
     public void updateState(NodeState newState, String peerUsername, String peerNodeId) {
         SwingUtilities.invokeLater(() -> {
+            String currentStatusText = statusLabel.getText();
+            Color currentStatusColor = statusLabel.getForeground();
+
             if (statusResetTimer != null && statusResetTimer.isRunning()) {
-                /* Let timer restore */ } else {
-                boolean connected = (newState == NodeState.CONNECTED_SECURE);
-                boolean connecting = (newState == NodeState.WAITING_MATCH || newState == NodeState.ATTEMPTING_UDP);
-                boolean canConnect = (newState == NodeState.DISCONNECTED && this.ownNodeId != null);
-                boolean canViewHistory = (this.ownNodeId != null && newState != NodeState.INITIALIZING
-                        && newState != NodeState.REGISTERING);
-                String statusText;
-                Color statusColor;
+                // Timer active, let it restore the status label
+            } else {
+                String statusTextUpdate;
+                Color statusColorUpdate;
                 String peerDisplay = "Peer";
-                if (connected || connecting) {
+                if (newState == NodeState.CONNECTED_SECURE || newState == NodeState.WAITING_MATCH || newState == NodeState.ATTEMPTING_UDP) {
                     peerDisplay = (peerUsername != null && !peerUsername.isEmpty()) ? peerUsername
-                            : (peerNodeId != null ? peerNodeId.substring(0, 8) + "..." : "Peer");
+                            : (peerNodeId != null ? peerNodeId.substring(0, Math.min(8, peerNodeId.length())) + "..." : "Peer");
                 }
+
                 switch (newState) {
                     case INITIALIZING:
-                        statusText = "Status: Initializing...";
-                        statusColor = Color.ORANGE;
-                        break;
+                        statusTextUpdate = "Status: Initializing..."; statusColorUpdate = Color.ORANGE; break;
                     case REGISTERING:
-                        statusText = "Status: Registering...";
-                        statusColor = Color.ORANGE;
-                        break;
+                        statusTextUpdate = "Status: Registering..."; statusColorUpdate = Color.ORANGE; break;
                     case DISCONNECTED:
-                        statusText = "Status: Disconnected";
-                        statusColor = Color.RED;
-                        break;
+                        statusTextUpdate = "Status: Disconnected"; statusColorUpdate = Color.RED; break;
                     case WAITING_MATCH:
-                        statusText = "Status: Waiting for " + peerDisplay + " match...";
-                        statusColor = Color.ORANGE;
-                        break;
+                        statusTextUpdate = "Status: Waiting for " + peerDisplay + " match..."; statusColorUpdate = Color.ORANGE; break;
                     case ATTEMPTING_UDP:
-                        statusText = "Status: Attempting P2P with " + peerDisplay + "...";
-                        statusColor = Color.ORANGE;
-                        break;
+                        statusTextUpdate = "Status: Attempting P2P with " + peerDisplay + "..."; statusColorUpdate = Color.ORANGE; break;
                     case CONNECTED_SECURE:
-                        statusText = "Status: ✅ Connected to " + peerDisplay;
-                        statusColor = new Color(0, 128, 0);
-                        break;
+                        statusTextUpdate = "Status: ✅ Connected to " + peerDisplay; statusColorUpdate = new Color(0, 128, 0); break;
                     case SHUTTING_DOWN:
-                        statusText = "Status: Shutting down...";
-                        statusColor = Color.GRAY;
-                        break;
+                        statusTextUpdate = "Status: Shutting down..."; statusColorUpdate = Color.GRAY; break;
                     default:
-                        statusText = "Status: Unknown";
-                        statusColor = Color.BLACK;
-                        break;
+                        statusTextUpdate = "Status: Unknown"; statusColorUpdate = Color.BLACK; break;
                 }
-                statusLabel.setText(statusText);
-                statusLabel.setForeground(statusColor);
-                connectButton.setEnabled(canConnect);
-                disconnectButton.setEnabled(connected || connecting);
-                sendButton.setEnabled(connected);
-                messageField.setEnabled(connected);
-                sendFileButton.setEnabled(connected);
-                copyIdButton.setEnabled(this.ownNodeId != null);
-                viewHistoryButton.setEnabled(canViewHistory);
-                if (!connected && !connecting) {
-                    clearFileProgress();
+                statusLabel.setText(statusTextUpdate);
+                statusLabel.setForeground(statusColorUpdate);
+            }
+
+            // Clear chatArea when a new session starts (state becomes CONNECTED_SECURE)
+            if (newState == NodeState.CONNECTED_SECURE) {
+                if (chatArea != null) { 
+                    chatArea.setText(""); // Clear previous messages
+                    // The "System: Chat session started with..." message that was here has been REMOVED
                 }
+            }
+            
+            boolean connected = (newState == NodeState.CONNECTED_SECURE);
+            boolean connecting = (newState == NodeState.WAITING_MATCH || newState == NodeState.ATTEMPTING_UDP);
+            boolean canConnect = (newState == NodeState.DISCONNECTED && this.ownNodeId != null);
+
+            connectButton.setEnabled(canConnect);
+            disconnectButton.setEnabled(connected || connecting);
+            sendButton.setEnabled(connected);
+            messageField.setEnabled(connected);
+            sendFileButton.setEnabled(connected);
+            copyIdButton.setEnabled(this.ownNodeId != null);
+
+            boolean baseHistoryEligibility = (this.ownNodeId != null &&
+                                             newState != NodeState.INITIALIZING &&
+                                             newState != NodeState.REGISTERING);
+            viewHistoryButton.setEnabled(baseHistoryEligibility && !connected);
+
+
+            if (!connected && !connecting) {
+                clearFileProgress();
             }
         });
     }
@@ -488,7 +492,7 @@ public class P2pChatGui implements GuiCallback {
                 transferLabels.put(transferId, label);
                 progressBar = new JProgressBar(0, 100);
                 progressBar.setStringPainted(true);
-                progressBar.setPreferredSize(new Dimension(100, 20));
+                progressBar.setPreferredSize(new Dimension(100, 25));
                 progressBar.setOpaque(false);
                 transferProgressBars.put(transferId, progressBar);
                 entryPanel.add(label, BorderLayout.NORTH);
@@ -521,11 +525,9 @@ public class P2pChatGui implements GuiCallback {
                 progressBar.setForeground(new Color(0, 150, 0));
             }
 
-            // <<< Fix: Check MouseListener Class >>>
             boolean completedReceived = (status == FileTransferState.Status.COMPLETED && !isSending);
-            MouseListener[] listeners = entryPanel.getMouseListeners(); // Check panel's listeners
+            MouseListener[] listeners = entryPanel.getMouseListeners();
             for (MouseListener ml : listeners) {
-                // <<< Use instanceof instead of class name string comparison >>>
                 if (ml instanceof OpenDownloadedFileListener) {
                     if (!completedReceived) {
                         entryPanel.removeMouseListener(ml);
@@ -552,18 +554,22 @@ public class P2pChatGui implements GuiCallback {
                 progressBar.setString(message);
                 progressBar.setForeground(success ? new Color(0, 150, 0) : Color.RED);
             }
-            if (label != null) {
-                label.setToolTipText(label.getToolTipText() + " - " + message);
+            if (label != null && label.getToolTipText() != null) {
+                 label.setToolTipText(label.getToolTipText() + " - " + message);
+            } else if (label != null) {
+                 FileTransferState tempState = nodeContext.ongoingTransfers.get(transferId);
+                 String filename = (tempState != null) ? tempState.filename : "File";
+                 String direction = (tempState != null && tempState.isSender) ? "Sending" : "Receiving";
+                 label.setToolTipText(String.format("%s '%s' - %s", direction, filename, message));
             }
+
 
             FileTransferState finalState = nodeContext.ongoingTransfers.get(transferId);
             if (success && finalState != null && !finalState.isSender && finalState.downloadPath != null
                     && entryPanel != null) {
                 final Path downloadedPath = finalState.downloadPath;
                 boolean listenerExists = false;
-                // <<< Fix: Check MouseListener Class >>>
                 for (MouseListener ml : entryPanel.getMouseListeners()) {
-                    // <<< Use instanceof instead of class name string comparison >>>
                     if (ml instanceof OpenDownloadedFileListener) {
                         listenerExists = true;
                         break;
@@ -576,62 +582,54 @@ public class P2pChatGui implements GuiCallback {
                     if (label != null)
                         label.setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
                 }
-            } else if (entryPanel != null) { // Remove listener if failed/sending
+            } else if (entryPanel != null) { 
                 entryPanel.setCursor(Cursor.getDefaultCursor());
                 if (label != null)
                     label.setCursor(Cursor.getDefaultCursor());
-                // <<< Fix: Check MouseListener Class >>>
                 for (MouseListener ml : entryPanel.getMouseListeners()) {
-                    // <<< Use instanceof instead of class name string comparison >>>
                     if (ml instanceof OpenDownloadedFileListener) {
                         entryPanel.removeMouseListener(ml);
                     }
                 }
-                entryPanel.setToolTipText(null);
+                 if (entryPanel.getToolTipText() != null && entryPanel.getToolTipText().startsWith("Click to open")) {
+                      entryPanel.setToolTipText(null);
+                 }
             }
-            // Keep entry persistent - NO TIMER TO REMOVE
         });
     }
 
     @Override
     public void clearFileProgress() {
         SwingUtilities.invokeLater(() -> {
-            new ArrayList<>(transferEntries.keySet()).forEach(this::removeTransferEntry);
-            transferPanel.removeAll();
+            for (JPanel panel : transferEntries.values()) {
+                 transferPanel.remove(panel);
+            }
+            transferEntries.clear();
+            transferProgressBars.clear();
+            transferLabels.clear();
             transferPanel.revalidate();
             transferPanel.repaint();
         });
     }
 
     private void removeTransferEntry(String transferId) {
-        transferLabels.remove(transferId);
-        transferProgressBars.remove(transferId);
-        JPanel entryPanelToRemove = transferEntries.remove(transferId);
-        if (entryPanelToRemove != null) {
-            Container grandParent = entryPanelToRemove.getParent();
-            if (grandParent == transferPanel) {
-                Component[] components = grandParent.getComponents();
-                int indexToRemove = -1;
-                for (int i = 0; i < components.length; i++) {
-                    if (components[i] == entryPanelToRemove) {
-                        indexToRemove = i;
-                        break;
-                    }
-                }
-                if (indexToRemove != -1) {
-                    if (indexToRemove + 1 < components.length && components[indexToRemove + 1] instanceof Box.Filler) {
-                        grandParent.remove(indexToRemove + 1);
-                    }
-                    grandParent.remove(indexToRemove);
-                }
-            }
-        }
-    } // Repaint handled by clearFileProgress
+        JProgressBar bar = transferProgressBars.remove(transferId);
+        JLabel lbl = transferLabels.remove(transferId);
+        JPanel entry = transferEntries.remove(transferId);
 
-    // --- Inner Class for History Dialog ---
+        if (entry != null) {
+             for (MouseListener ml : entry.getMouseListeners()) {
+                 entry.removeMouseListener(ml);
+             }
+             transferPanel.remove(entry);
+             transferPanel.revalidate();
+             transferPanel.repaint();
+        }
+    }
+
     private class HistoryDialog extends JDialog {
         public HistoryDialog(Frame owner, String title, String content, boolean showBackButton, P2pChatGui parentGui) {
-            super(owner, title, false); // Non-modal
+            super(owner, title, false);
             setSize(600, 500);
             setLocationRelativeTo(owner);
             setDefaultCloseOperation(JDialog.DISPOSE_ON_CLOSE);
@@ -648,7 +646,6 @@ public class P2pChatGui implements GuiCallback {
             buttonPanel.add(closeButton);
             if (showBackButton) {
                 JButton backButton = new JButton("Back to List");
-                // <<< Use lambda expression directly for clarity >>>
                 backButton.addActionListener(e -> {
                     dispose();
                     SwingUtilities.invokeLater(parentGui::promptAndShowHistory);
@@ -661,7 +658,6 @@ public class P2pChatGui implements GuiCallback {
         }
     }
 
-    // --- Inner Class Listener for opening files ---
     private class OpenDownloadedFileListener extends MouseAdapter {
         private final Path filePath;
 
@@ -679,6 +675,8 @@ public class P2pChatGui implements GuiCallback {
             if (!Files.exists(filePath)) {
                 JOptionPane.showMessageDialog(frame, "File no longer exists:\n" + filePath, "Open Error",
                         JOptionPane.ERROR_MESSAGE);
+                 ((JComponent)e.getSource()).removeMouseListener(this);
+                 ((JComponent)e.getSource()).setCursor(Cursor.getDefaultCursor());
                 return;
             }
             if (!Desktop.isDesktopSupported() || !Desktop.getDesktop().isSupported(Desktop.Action.OPEN)) {
@@ -699,4 +697,4 @@ public class P2pChatGui implements GuiCallback {
         }
     }
 
-} // End of P2pChatGui class
+}
