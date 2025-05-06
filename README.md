@@ -97,7 +97,7 @@ You need to run the Coordination Server first, and then run two (or more) P2P No
     Run it in a dedicated terminal window. From the project root directory:
     * **Linux/macOS:**
         ```bash
-        java -cp bin:lib/json.jar main.java.com.p2pchat.server.CoordinationServer
+        java -cp "bin:lib/json.jar" main.java.com.p2pchat.server.CoordinationServer
         ```
     * **Windows:**
         ```bash
