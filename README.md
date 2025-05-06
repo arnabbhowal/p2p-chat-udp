@@ -1,16 +1,16 @@
 # P2P Secure Chat & File Transfer over UDP
 
-This project implements a peer-to-peer (P2P) chat application in Java where nodes connect directly using UDP for communication. It features end-to-end encryption for chats and supports small file transfers between connected peers. A central coordination server facilitates peer discovery and connection setup.
+This project implements a peer-to-peer (P2P) chat application in Java, primarily interacted with via a Swing-based Graphical User Interface (GUI), where nodes connect directly using UDP for communication. It features end-to-end encryption for chats and supports small file transfers between connected peers. A central coordination server facilitates peer discovery and connection setup.
 
 ## Features
 
 * **Peer-to-Peer Communication:** Clients connect directly after initial coordination.
 * **UDP Based:** Uses UDP for low-latency communication.
 * **End-to-End Encryption (E2EE):** Chat messages and file data are encrypted using AES-GCM derived from an ECDH key exchange. Ensures only the communicating peers can read the content.
+* **User Interface:** Provides both a user-friendly Graphical User Interface (GUI) for most operations and a Command-Line Interface (CLI).
 * **Coordination Server:** Helps nodes find each other and exchange necessary information (IP addresses, public keys) to establish a direct connection.
 * **File Transfer:** Supports sending and receiving small files (up to 1 MiB by default) between connected peers with negotiation (accept/reject).
 * **Basic UDP Reliability:** Implements a simple Stop-and-Wait acknowledgment mechanism for file transfer chunks.
-* **Command-Line Interface (CLI):** Simple interface for interacting with the application.
 * **Chat History:** Saves chat logs to local CSV files.
 * **Downloads Folder:** Saves received files locally.
 
@@ -18,6 +18,7 @@ This project implements a peer-to-peer (P2P) chat application in Java where node
 
 * **Java Development Kit (JDK):** Version 8 or higher recommended. Make sure `javac` and `java` commands are available in your system's PATH.
 * **JSON Library:** A JSON parsing library is required. This project assumes you have `org.json.jar` (available from [MVNRepository](https://mvnrepository.com/artifact/org.json/json) or other sources).
+* **(Optional for GUI Icons):** The GUI attempts to load a copy icon from `src/main/resources/icons/copy_icon.png`. If this file is not present, a simple text button `[C]` will be used as a fallback. You can create these directories and add a 16x16 or 20x20 PNG icon if desired.
 
 ## Setup
 
@@ -26,6 +27,9 @@ This project implements a peer-to-peer (P2P) chat application in Java where node
     * Create a directory named `lib` in the project's root folder (alongside `src`).
     * Download `json-YYYYMMDD.jar` (or similar) from a source like MVNRepository.
     * Rename the downloaded file to `json.jar` and place it inside the `lib` directory.
+3.  **(Optional for GUI Icons):**
+    * Create a directory path `src/main/resources/icons/` within your project structure.
+    * Place an icon file named `copy_icon.png` (e.g., a 16x16 or 20x20 PNG) in this `icons` directory.
 
     Your project structure should look something like this:
 
@@ -35,12 +39,15 @@ This project implements a peer-to-peer (P2P) chat application in Java where node
     │   └── json.jar
     ├── src/
     │   └── main/
-    │       └── java/
-    │           └── com/
-    │               └── p2pchat/
-    │                   ├── common/
-    │                   ├── node/
-    │                   └── server/
+    │       ├── java/
+    │       │   └── com/
+    │       │       └── p2pchat/
+    │       │           ├── common/
+    │       │           ├── node/
+    │       │           └── server/
+    │       └── resources/      (Optional, for GUI icons)
+    │           └── icons/      (Optional, for GUI icons)
+    │               └── copy_icon.png (Optional, for GUI icons)
     ├── chat_history/ (Will be created automatically)
     └── downloads/    (Will be created automatically)
     └── README.md     (This file)
@@ -57,13 +64,14 @@ This project implements a peer-to-peer (P2P) chat application in Java where node
 
     * **Linux/macOS:**
         ```bash
-        javac -cp lib/json.jar -d bin src/main/java/com/p2pchat/common/*.java src/main/java/com/p2pchat/node/**/*.java src/main/java/com/p2pchat/server/**/*.java
+        javac -cp lib/json.jar:src/main/resources -d bin src/main/java/com/p2pchat/common/*.java src/main/java/com/p2pchat/node/**/*.java src/main/java/com/p2pchat/server/**/*.java
         ```
+        *(Note: Added `src/main/resources` to classpath for the icon. If you are not using the icon, you can omit `:src/main/resources`)*
     * **Windows:**
         ```bash
-        javac -cp "lib/json.jar" -d bin src/main/java/com/p2pchat/common/*.java src/main/java/com/p2pchat/node/**/*.java src/main/java/com/p2pchat/server/**/*.java
+        javac -cp "lib/json.jar;src/main/resources" -d bin src/main/java/com/p2pchat/common/*.java src/main/java/com/p2pchat/node/**/*.java src/main/java/com/p2pchat/server/**/*.java
         ```
-        *(Note: Windows might use semicolons `;` instead of colons `:` in classpath depending on the shell, but quotes often help)*
+        *(Note: Added `src/main/resources` to classpath for the icon. If you are not using the icon, you can omit `;src/main/resources`. Windows might use semicolons `;` instead of colons `:` in classpath depending on the shell, but quotes often help)*
 
     This command compiles all `.java` files within the `common`, `node`, and `server` packages and their subpackages.
 
@@ -73,9 +81,19 @@ You need to run the Coordination Server first, and then run two (or more) P2P No
 
 **1. Running the Coordination Server**
 
-* The server simply listens for clients. Run it in a dedicated terminal window.
-* From the project root directory:
-
+* The server simply listens for clients.
+* **Challenges with Local Server and External Nodes:** If you run the `CoordinationServer` on your local machine (e.g., behind a home router/NAT), nodes from *different* networks (i.e., outside your local network) will likely **not** be able to reach it. This is because:
+    * Your local machine's IP address is typically a private IP (e.g., `192.168.x.x`), not directly routable from the public internet.
+    * Your router/firewall will block incoming connections to arbitrary ports on your local machine by default.
+    * To allow external connections, you would need to configure **port forwarding** on your router (e.g., forward UDP port 19999 to your local machine's private IP) and ensure your firewall allows incoming UDP traffic on that port. This can be complex and vary between routers.
+* **Using a Hosted Server (Recommended for Testing Across Networks):**
+    To simplify testing with nodes on different networks, a temporary instance of the coordination server has been hosted on a Google Cloud VM.
+    * **Public IP Address:** `34.136.226.168` (Listens on UDP port `19999`)
+    * **Availability:** This is a temporary server for demonstration/testing and will be turned off once free credits expire.
+    * Firewall rules on the cloud instance have been configured to allow incoming UDP traffic on port `19999`.
+    * You do **not** need to run the `CoordinationServer` yourself if you use this hosted IP.
+* **Running Your Own Server (For Local Testing or If Hosted is Down):**
+    Run it in a dedicated terminal window. From the project root directory:
     * **Linux/macOS:**
         ```bash
         java -cp bin:lib/json.jar main.java.com.p2pchat.server.CoordinationServer
@@ -84,76 +102,157 @@ You need to run the Coordination Server first, and then run two (or more) P2P No
         ```bash
         java -cp "bin;lib/json.jar" main.java.com.p2pchat.server.CoordinationServer
         ```
-* You should see output indicating the server is listening, e.g., `[*] Coordination Server listening on UDP port 19999`.
-* Keep this terminal window open while clients are running. Use Ctrl+C to stop the server.
+    * You should see output indicating the server is listening, e.g., `[*] Coordination Server listening on UDP port 19999`.
+    * Keep this terminal window open while clients are running. Use Ctrl+C to stop the server.
 
 **2. Running the P2P Node Client**
 
-* Each client needs its own terminal window.
+The application will primarily launch a Graphical User Interface (GUI).
+
+* Each client needs its own terminal window to launch.
 * You need to provide the IP address of the machine running the Coordination Server as a command-line argument.
-* From the project root directory:
+* From the project root directory (ensure your classpath includes `src/main/resources` if you compiled with it for the icon):
 
-    * **If server is running on the *same* machine:**
-        * Linux/macOS: `java -cp bin:lib/json.jar main.java.com.p2pchat.node.P2PNode 127.0.0.1`
-        * Windows: `java -cp "bin;lib/json.jar" main.java.com.p2pchat.node.P2PNode 127.0.0.1`
-    * **If server is running on a *different* machine (e.g., IP `A.B.C.D`):**
-        * Linux/macOS: `java -cp bin:lib/json.jar main.java.com.p2pchat.node.P2PNode A.B.C.D`
-        * Windows: `java -cp "bin;lib/json.jar" main.java.com.p2pchat.node.P2PNode A.B.C.D`
+    * **To use the hosted Google Cloud server:**
+        * Linux/macOS: `java -cp bin:lib/json.jar:src/main/resources main.java.com.p2pchat.node.P2PNode 34.136.226.168`
+        * Windows: `java -cp "bin;lib/json.jar;src/main/resources" main.java.com.p2pchat.node.P2PNode 34.136.226.168`
+    * **If server is running on the *same* local machine (and you are running your own server):**
+        * Linux/macOS: `java -cp bin:lib/json.jar:src/main/resources main.java.com.p2pchat.node.P2PNode 127.0.0.1`
+        * Windows: `java -cp "bin;lib/json.jar;src/main/resources" main.java.com.p2pchat.node.P2PNode 127.0.0.1`
+    * **If server is running on a *different local* machine (e.g., IP `A.B.C.D`, and you are running your own server):**
+        * Linux/macOS: `java -cp bin:lib/json.jar:src/main/resources main.java.com.p2pchat.node.P2PNode A.B.C.D`
+        * Windows: `java -cp "bin;lib/json.jar;src/main/resources" main.java.com.p2pchat.node.P2PNode A.B.C.D`
     * **If you omit the IP address, it defaults to `127.0.0.1`.**
+    * *(Note: If you didn't compile with `src/main/resources` in the classpath, you can omit it from these run commands as well.)*
 
-* The client will start, generate keys, ask for a username, register with the server, and then present you with a command prompt.
-* You will see your assigned **Node ID** after successful registration - you need this ID to connect to other peers.
+* **Username Prompt:** Upon launching, a dialog box will appear asking you to "Enter your desired username". Type your username and click "OK". This username will be visible to your chat peers.
+* The GUI window will then appear. After successful registration with the server, you will see your assigned **Node ID** in the GUI.
+
+## Using the Client (Graphical User Interface - GUI)
+
+The application will primarily launch a Graphical User Interface (GUI) built with Java Swing.
+
+**1. Understanding the GUI Layout**
+
+The main window titled "P2P Secure Chat" is divided into several sections:
+
+* **Top Panel:**
+    * **Node ID Display:** Shows "Node ID: \<Your Node ID\>" once registered with the server.
+        * **Copy ID Button (Icon/\[C]):** Next to the Node ID, click this small icon (or `[C]` button) to copy your Node ID to the clipboard. This is useful for sharing with peers.
+    * **Status Label:** Displays the current status of the application (e.g., "Status: Initializing...", "Status: Disconnected", "Status: ✅ Connected to \<PeerName\>"). The color of the text also changes to indicate the state (e.g., orange for connecting, green for connected, red for disconnected).
+    * **Action Buttons:**
+        * `Connect`: Initiates a connection to another peer.
+        * `Disconnect`: Disconnects from the currently connected peer or cancels an ongoing connection attempt.
+        * `Send File`: Allows you to select and send a file to the connected peer.
+        * `History`: Lets you view your chat history.
+
+* **Center Panel (Chat Area):**
+    * This large text area displays the chat messages between you and your peer. Messages are prefixed with the sender's name (e.g., `[You]: Hello`, `[PeerName]: Hi there!`).
+
+* **Right Panel (File Transfers):**
+    * This panel, labeled "File Transfers," shows the progress of any ongoing or completed file transfers. Each transfer will display:
+        * Direction (Sending/Receiving) and Filename.
+        * Status (e.g., OFFER_SENT, AWAITING_ACCEPT, TRANSFERRING_RECV, COMPLETED, FAILED).
+        * A progress bar showing the percentage of completion.
+    * Completed received files can be clicked to attempt opening them with the system's default application.
+
+* **Bottom Panel (Message Input):**
+    * **Message Field:** A text field where you type your chat messages.
+    * **Send Button:** Click this button to send the message typed in the message field. Pressing `Enter` in the message field also sends the message.
+
+**2. GUI Workflow and Actions**
+
+* **Initial State:**
+    * When the GUI starts, the status will be "Status: Initializing...".
+    * The application will then attempt to register with the server. The status will change to "Status: Registering...".
+    * Once successfully registered, your Node ID will appear, the `Copy ID` button will become active, and the status will change to "Status: Disconnected". The `Connect` and `History` buttons will also become enabled.
+
+* **Connecting to a Peer:**
+    1.  Ensure both you and your peer have launched the client and are registered (Status: Disconnected, and Node ID is visible).
+    2.  Share your Node IDs with each other (e.g., using the `Copy ID` button).
+    3.  Click the `Connect` button. A dialog box will appear asking for "Peer Node ID".
+    4.  Enter your peer's Node ID into the dialog and click "OK".
+    5.  Your peer must also perform the same steps, entering *your* Node ID.
+    6.  The `Status Label` will update to "Status: Waiting for \<PeerID_Prefix\> match...", then "Status: Attempting P2P with \<PeerID_Prefix\>...".
+    7.  Once the connection is successfully established and keys are exchanged, the status will change to "Status: ✅ Connected to \<PeerName\>" (text in green). The `Disconnect` and `Send File` buttons, as well as the message input field and `Send` button, will become enabled.
+
+* **Chatting:**
+    1.  Once connected, type your message into the **Message Field** at the bottom.
+    2.  Click the `Send` button or press `Enter`.
+    3.  Your message will appear in the **Chat Area** prefixed with `[You]:`.
+    4.  Incoming messages from your peer will appear prefixed with `[PeerName]:`.
+
+* **Sending a File:**
+    1.  Ensure you are connected to a peer.
+    2.  Click the `Send File` button.
+    3.  A file chooser dialog will open. Select the file you wish to send and click "Open" (or equivalent).
+    4.  An entry for this file transfer will appear in the **File Transfers** panel, initially with a status like "Sending 'filename' (OFFER_SENT)" or "(AWAITING_ACCEPT)".
+    5.  Your peer will receive a dialog box notifying them of the incoming file offer.
+
+* **Receiving a File:**
+    1.  When a peer offers you a file, a dialog box will pop up showing the filename, size, and sender's username, asking "Accept this file?".
+    2.  Click `Yes` to accept or `No` to reject.
+    3.  If you accept, an entry for the file will appear in the **File Transfers** panel with status "Receiving 'filename' (TRANSFERRING_RECV)". The progress bar will update as the file is downloaded.
+    4.  Once completed, the status will change to "COMPLETED". The file will be saved in the `downloads` directory in your project folder.
+    5.  You can click on the completed entry in the **File Transfers** panel to try and open the received file.
+    6.  If you reject, the sender will be notified.
+
+* **Viewing Chat History:**
+    1.  Click the `History` button.
+    2.  **If Connected:** A dialog will open displaying the chat history with the currently connected peer.
+    3.  **If Disconnected:** A dialog will appear listing all available past chat histories (identified by peer username and part of their Node ID). Select a history and click "OK" (or it might open directly, depending on implementation details) to view it.
+    4.  The history dialog has a "Close" button. If you accessed it from the list of past chats, it may also have a "Back to List" button.
+
+* **Disconnecting:**
+    1.  If connected, click the `Disconnect` button. The status will change to "Status: Disconnected".
+    2.  If you are in the process of connecting (e.g., "Waiting for match" or "Attempting P2P"), clicking `Disconnect` will cancel the attempt.
+
+* **Quitting the Application:**
+    * Close the main GUI window (click the 'X' button). This will initiate a clean shutdown of the P2P node.
+
+**3. Example GUI Workflow (using the hosted server `34.136.226.168`)**
+
+1.  **(No need to start local server if using the hosted one)**
+2.  **Start Client 1 (Alice):** Run `java -cp "bin;lib/json.jar;src/main/resources" main.java.com.p2pchat.node.P2PNode 34.136.226.168` (adjust for OS). Enter "Alice" at the username prompt. The GUI appears. Alice clicks the `Copy ID` button.
+3.  **Start Client 2 (Bob):** Run `java -cp "bin;lib/json.jar;src/main/resources" main.java.com.p2pchat.node.P2PNode 34.136.226.168` (adjust for OS). Enter "Bob" at the username prompt. The GUI appears. Bob clicks `Copy ID`.
+4.  Alice and Bob share their Node IDs.
+5.  **Connect (Alice):** Alice clicks `Connect`, enters Bob's Node ID, and clicks "OK".
+6.  **Connect (Bob):** Bob clicks `Connect`, enters Alice's Node ID, and clicks "OK".
+7.  **Connection Establishes:** Both GUIs update their status to "✅ Connected to [PeerName]".
+8.  **Chat (Alice):** Alice types "Hello Bob via GUI!" in the message field and clicks `Send`.
+9.  **Chat (Bob):** Bob sees "[Alice]: Hello Bob via GUI!" in his chat area.
+10. **Send File (Alice):** Alice clicks `Send File`, selects a file (e.g., `test.txt`), and clicks "Open".
+11. **Receive Offer (Bob):** Bob gets a dialog: "Incoming file offer from Alice...". Bob clicks `Yes`.
+12. **Completion:** Both see "COMPLETED" in their File Transfers panel. Bob finds `test.txt` in his `downloads` folder.
+13. **Quit:** Both close their GUI windows.
 
 ## Using the Client (CLI Commands)
 
-Once the client is running and registered (you see the `[?] Enter 'connect'...` prompt), you can use the following commands:
+While the GUI is the primary interface, the CLI is available if the GUI fails or for advanced users. If the client is launched and the GUI fails to start, or if it's built/run to bypass the GUI, you might get a command prompt.
 
-* **`id`**: Displays your username and unique Node ID. Share this ID with others so they can connect to you.
-* **`status`** or **`s`**: Shows your current connection status (Disconnected, Waiting, Connected, etc.) and lists any ongoing file transfers.
-* **`connect <peer_node_id>`**: Initiates a connection attempt to the specified peer using their Node ID.
+Once the client is running and registered (you see the `[?] Enter 'connect'...` prompt in the console), you can use the following commands:
+
+* **`id`**: Displays your username and unique Node ID.
+* **`status`** or **`s`**: Shows your current connection status and lists ongoing file transfers.
+* **`connect <peer_node_id>`**: Initiates a connection attempt to the specified peer.
     * Example: `connect e361fe63-254a-4ece-b555-425f8571ea2c`
-    * Both peers need to execute the `connect` command with the *other's* ID for the server to match them.
-* **`chat <message>`** or **`c <message>`**: Sends an encrypted chat message to the connected peer.
+* **`chat <message>`** or **`c <message>`**: Sends an encrypted chat message.
     * Example: `chat Hello there!`
-* **(Default Input)**: When connected, simply typing text and pressing Enter (without a command like `chat` or `send`) will also send it as a chat message.
-    * Example: `How are you?` (will be sent as a chat message)
-* **`send <filepath>`**: Initiates sending a file to the connected peer. Provide the full or relative path to the file.
+* **(Default Input)**: When connected, simply typing text and pressing Enter (without a command) sends it as a chat message.
+* **`send <filepath>`**: Initiates sending a file.
     * Example: `send my_document.txt`
-    * Example: `send /Users/sanju/files/image.jpg`
-    * The peer will receive an offer notification.
-* **`accept <transfer_id>`**: Accepts an incoming file offer identified by `<transfer_id>`. The ID is shown when the offer arrives.
-    * Example: `accept a1b2c3d4-e5f6-7890-abcd-ef1234567890`
+* **`accept <transfer_id>`**: Accepts an incoming file offer.
 * **`reject <transfer_id>`**: Rejects an incoming file offer.
-    * Example: `reject a1b2c3d4-e5f6-7890-abcd-ef1234567890`
-* **`disconnect`** or **`cancel`**:
-    * If connected: Disconnects from the current peer.
-    * If waiting for connection or attempting connection: Cancels the connection attempt.
-* **`quit`** or **`exit`**: Shuts down the client application cleanly and returns you to the terminal prompt.
+* **`disconnect`** or **`cancel`**: Disconnects or cancels a connection attempt.
+* **`quit`** or **`exit`**: Shuts down the client.
 
-## Example Workflow
-
-1.  **Start Server:** Run `CoordinationServer` in one terminal. Note its IP address if running clients on other machines.
-2.  **Start Client 1:** Run `P2PNode <server_ip>` in a second terminal. Enter username "Alice". Note Alice's Node ID (e.g., `alice-id-123`).
-3.  **Start Client 2:** Run `P2PNode <server_ip>` in a third terminal. Enter username "Bob". Note Bob's Node ID (e.g., `bob-id-456`).
-4.  **Connect (Alice):** In Alice's terminal, type: `connect bob-id-456`
-5.  **Connect (Bob):** In Bob's terminal, type: `connect alice-id-123`
-6.  **Connection Establishes:** Both clients should show status updates indicating connection attempt and eventually "[+] SECURE E2EE CONNECTION ESTABLISHED...". The prompt will change to `[Chat 🔒 ...]`.
-7.  **Chat (Alice):** Type `Hello Bob!` and press Enter.
-8.  **Chat (Bob):** Bob sees "[Alice]: Hello Bob!". Bob types `Hi Alice!` and presses Enter.
-9.  **Send File (Alice):** Alice creates a small file `test.txt`. In her terminal, she types: `send test.txt`. She sees an offer message being sent.
-10. **Receive Offer (Bob):** Bob sees the incoming file offer notification with a transfer ID (e.g., `offer-id-789`).
-11. **Accept File (Bob):** Bob types: `accept offer-id-789`. He sees a message indicating the file is being received.
-12. **Transfer Progress:** Alice sees messages like "[FileTransfer:...] Sent chunk X/Y".
-13. **Completion:** Both see completion messages. Bob finds `test.txt` inside the `downloads` folder in his project directory.
-14. **Disconnect (Alice):** Alice types `disconnect`.
-15. **Disconnect (Bob):** Bob sees a message that the peer has disconnected. Both prompts return to the disconnected state.
-16. **Quit:** Both type `quit` to exit their clients.
-17. **Stop Server:** Stop the `CoordinationServer` using Ctrl+C.
+*(The Example Workflow provided earlier primarily describes CLI interaction; the GUI workflow above is more typical for this version.)*
 
 ## Directories
 
 * **`lib/`**: Contains the required `json.jar` library.
 * **`src/`**: Contains all the Java source code.
+    * **`src/main/resources/`**: (Optional) Can hold resources like GUI icons.
 * **`bin/`**: Contains the compiled `.class` files (created during compilation).
 * **`chat_history/`**: Automatically created by clients. Stores `.csv` files containing chat logs for each peer connection. Files are named like `chat_<PeerUsername>_<PeerNodeID>.csv`.
 * **`downloads/`**: Automatically created by clients. Stores files received via the file transfer feature.
@@ -169,7 +268,7 @@ Once the client is running and registered (you see the `[?] Enter 'connect'...` 
 ## Limitations
 
 * **UDP Unreliability:** UDP does not guarantee packet delivery or order for chat messages. Messages *might* be lost. File transfers use a simple acknowledgment mechanism, making them slow but more reliable than chat.
-* **NAT Traversal:** Basic hole punching may not work through all types of NATs (especially symmetric NATs).
+* **NAT Traversal:** Basic hole punching may not work through all types of NATs (especially symmetric NATs). If direct P2P connection fails, communication will not be possible.
 * **File Transfer Speed:** The Stop-and-Wait ACK mechanism for file transfers is simple but very slow compared to TCP or more advanced UDP reliability protocols. The file size limit (default 1 MiB) reflects this.
 * **Server Single Point of Failure:** If the coordination server is down, new connections cannot be initiated.
-* **Security:** Relies on trusting the coordination server during key exchange. No mechanism to verify peer identity beyond what the server provides.
+* **Security:** Relies on trusting the coordination server during the initial public key exchange. No mechanism to verify peer identity beyond what the server provides.
