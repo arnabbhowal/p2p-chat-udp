@@ -64,12 +64,12 @@ This project implements a peer-to-peer (P2P) chat application in Java, primarily
 
     * **Linux/macOS:**
         ```bash
-        javac -cp lib/json.jar:src/main/resources -d bin src/main/java/com/p2pchat/common/*.java src/main/java/com/p2pchat/node/**/*.java src/main/java/com/p2pchat/server/**/*.java
+        javac -cp "lib/json.jar" -sourcepath src -d bin src/main/java/com/p2pchat/common/*.java src/main/java/com/p2pchat/node/**/*.java src/main/java/com/p2pchat/server/**/*.java
         ```
         *(Note: Added `src/main/resources` to classpath for the icon. If you are not using the icon, you can omit `:src/main/resources`)*
     * **Windows:**
         ```bash
-        javac -cp "lib/json.jar;src/main/resources" -d bin src/main/java/com/p2pchat/common/*.java src/main/java/com/p2pchat/node/**/*.java src/main/java/com/p2pchat/server/**/*.java
+        javac -cp "lib\json.jar" -d bin src\main\java\com\p2pchat\common\*.java src\main\java\com\p2pchat\node\**\*.java src\main\java\com\p2pchat\server\**\*.java
         ```
         *(Note: Added `src/main/resources` to classpath for the icon. If you are not using the icon, you can omit `;src/main/resources`. Windows might use semicolons `;` instead of colons `:` in classpath depending on the shell, but quotes often help)*
 
