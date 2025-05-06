@@ -73,7 +73,7 @@ This project implements a peer-to-peer (P2P) chat application in Java, primarily
         ```
         *(Note: Added `src/main/resources` to classpath for the icon. If you are not using the icon, you can omit `;src/main/resources`. Windows might use semicolons `;` instead of colons `:` in classpath depending on the shell, but quotes often help)*
 
-    This command compiles all `.java` files within the `common`, `node`, and `server` packages and their subpackages.
+    This command compiles all `.java` files within the `common`, `node`, and `server` packages and their subpackages (as per their `package` declarations, which include `main.java.` prefix).
 
 ## Running the Application
 
@@ -230,7 +230,7 @@ The main window titled "P2P Secure Chat" is divided into several sections:
 
 While the GUI is the primary interface, the CLI is available if the GUI fails or for advanced users. If the client is launched and the GUI fails to start, or if it's built/run to bypass the GUI, you might get a command prompt.
 
-Once the client is running and registered (you see the `[?] Enter 'connect'...` prompt in the console), you can use the following commands:
+Once the client is running and registered (you will see a dynamic prompt like `[?] Enter 'connect', 'status', 'id', 'quit': ` in the console when disconnected), you can use the following commands:
 
 * **`id`**: Displays your username and unique Node ID.
 * **`status`** or **`s`**: Shows your current connection status and lists ongoing file transfers.
@@ -246,7 +246,7 @@ Once the client is running and registered (you see the `[?] Enter 'connect'...` 
 * **`disconnect`** or **`cancel`**: Disconnects or cancels a connection attempt.
 * **`quit`** or **`exit`**: Shuts down the client.
 
-*(The Example Workflow provided earlier primarily describes CLI interaction; the GUI workflow above is more typical for this version.)*
+*(The GUI workflow detailed earlier is the primary way to interact with this application. The CLI commands listed above are available for advanced use or if the GUI cannot be used.)*
 
 ## Directories
 
