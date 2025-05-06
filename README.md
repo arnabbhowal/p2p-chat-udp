@@ -56,7 +56,7 @@ This project implements a peer-to-peer (P2P) chat application in Java, primarily
 ## Compilation
 
 1.  Open a terminal or command prompt in the project's root directory (`p2p-chat-udp`).
-2.  Create a `bin` directory for the compiled `.class` files (SKIP THIS STEP SINCE BIN WILL ALREADY BE THERE NOW):
+2.  Create a `bin` directory for the compiled `.class` files:
     ```bash
     mkdir bin
     ```
